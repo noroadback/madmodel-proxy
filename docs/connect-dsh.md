@@ -53,14 +53,16 @@ node refresh-token.js login
 双击 **`start.cmd`**。它会依次:
 
 1. 检查 8080 端口——已有实例在跑则直接退出,不会重复启动;
-2. 启动 token 续期守护(最小化窗口;到期前 30 分钟自动续期);
-3. 前台启动代理,看到如下输出即成功:
+2. 以**单窗口**启动(dashboard.js):续期守护与代理同窗运行,
+   日志以 `[watch]`/`[代理]` 前缀区分,Ctrl+C 或关窗即全部停止;
+3. 看到如下输出即成功:
 
 ```
-madmodel 反代已启动: http://127.0.0.1:8080/v1
-模型: DeepSeek-V4-Flash
-本地鉴权: 已启用(本次生成随机 key,客户端 Bearer key 见: C:\Users\<你>\.dsh-madmodel\api-key)
-当前 token 剩余 272 分钟
+[watch] madmodel token 自动续期守护进程已启动(PID 12345)
+[代理] madmodel 反代已启动: http://127.0.0.1:8080/v1
+[代理] 模型: DeepSeek-V4-Flash
+[代理] 本地鉴权: 已启用(本次生成随机 key,客户端 Bearer key 见: %USERPROFILE%\.dsh-madmodel\api-key)
+[代理] 当前 token 剩余 272 分钟
 ```
 
 首次启动会自动生成一个随机 API key——**接下来 dsh 要用的就是它**。
@@ -114,8 +116,8 @@ curl http://127.0.0.1:8080/v1/models
 | 现象 | 含义 | 处理 |
 |---|---|---|
 | dsh 报 401"无效或缺失 API key" | key 没配或配错 | `node refresh-token.js key` 重新复制 |
-| dsh 报 401"token 已过期" | 续期守护没在运行 | 看最小化的 watch 窗口是否存活,死了就重开 start.cmd |
-| dsh 报 503 | 本地无 token | 没做过第 1 步,或 watch 窗口里有报错 |
+| dsh 报 401"token 已过期" | 续期守护没在运行 | 看 start.cmd 窗口里 `[watch]` 日志是否报错/停止,死了就重开 start.cmd |
+| dsh 报 503 | 本地无 token | 没做过第 1 步,或窗口里 `[watch]` 日志有报错 |
 | dsh 报 429 | 触发代理限速(60 次/分钟 / 并发 8) | 稍等重试;agent 失控时可暂时关掉代理 |
 | dsh 报 5xx 且提示上游拒绝 | madmodel 服务端问题 | 与本工具无关,稍后再试 |
 

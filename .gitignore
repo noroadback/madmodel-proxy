@@ -1,6 +1,7 @@
 # 运行时产物(诊断/状态,不入库)
 last-failed-request.json
 *.tmp
+*.stale.*
 
 # 凭据与密钥(正常位于 %USERPROFILE%\.dsh-madmodel\,此为防御性兜底)
 api-key

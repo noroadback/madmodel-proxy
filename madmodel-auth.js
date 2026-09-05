@@ -1,8 +1,9 @@
 // madmodel-auth.js
-// 清华统一认证 → WebVPN → info 门户漫游 → madmodel token 全链(桌面 Node 移植版)。
-// 协议复刻自 THUday 小程序(services/learn-client.js + thuinfo-schedule-client.js,
-// 该实现已在真机验证),运行时依赖全部换成 Node 原生:
-//   - fetch(redirect:'manual') + getSetCookie() 替代 wx.request/原生桥
+// 清华统一认证 → WebVPN → info 门户漫游 → madmodel token 全链(纯 Node 实现)。
+// 协议知识来自 thu-learn-lib(MIT)/learnX(MIT)/thu-info-app 的公开行为,
+// 本文件为独立实现(thu-info-app 的协议库 @thu-info/lib 为 BSL,未引用其任何代码)。
+// 运行时依赖全部为 Node 原生:
+//   - fetch(redirect:'manual') + getSetCookie() 逐跳管理 cookie
 //   - sm2.js(sm-crypto v0.3.13,vendored)直接 require
 // 输出:{ token, expiresAt } —— token 对直连端点 madmodel.cs.tsinghua.edu.cn 有效。
 
@@ -41,41 +42,36 @@ if (!sm2 || typeof sm2.doEncrypt !== 'function') {
 // 旧 Node 上若静默降级,表现为难排查的登录失败;这里启动即报清楚。
 if (typeof fetch !== 'function' || typeof Headers === 'undefined' ||
     typeof Headers.prototype.getSetCookie !== 'function') {
-  throw new Error('需要 Node.js 18.14+/19.7+(原生 fetch 与 Headers.getSetCookie),当前 ' + process.version);
+  throw new Error(`需要 Node.js 18.14+/19.7+(原生 fetch 与 Headers.getSetCookie),当前 ${process.version}`);
+}
+// id 系统页面是 gb2312/GBK,判读登录结果要按中文匹配,故要求 GBK 解码可用。
+// nodejs.org 的官方构建自 Node 13 起均为 full-icu;仅自行裁剪的 small-icu 构建
+// 会缺失。fail closed:静默退化会让"密码错误"之类的判断悄悄失效
+try {
+  new TextDecoder('gbk');
+} catch (e) {
+  throw new Error('当前 Node.js 缺少 GBK 解码支持(small-icu 构建),无法判读学校登录页,请改用 nodejs.org 官方构建');
 }
 
-// ===== 端点(与 THUday 保持一致) =====
+// ===== 端点(实测于 2026-09,学校改版即失效) =====
 const ID_PREFIX = 'https://id.tsinghua.edu.cn';
 const WEBVPN_PREFIX = 'https://webvpn.tsinghua.edu.cn';
-const WEBVPN_OAUTH_LOGIN = () => WEBVPN_PREFIX + '/login?oauth_login=true';
-const ID_LOGIN_CHECK = () => ID_PREFIX + '/do/off/ui/auth/login/check';
-const ID_DOUBLE_AUTH = () => ID_PREFIX + '/b/doubleAuth/login';
-const ID_SAVE_FINGER = () => ID_PREFIX + '/b/doubleAuth/personal/saveFinger';
-const ID_INFO_APP_FORM = () => ID_PREFIX + '/do/off/ui/auth/login/form/10000ea055dd8d81d09d5a1ba55d39ad/0';
+const WEBVPN_OAUTH_LOGIN = () => `${WEBVPN_PREFIX}/login?oauth_login=true`;
+const ID_LOGIN_CHECK = () => `${ID_PREFIX}/do/off/ui/auth/login/check`;
+const ID_DOUBLE_AUTH = () => `${ID_PREFIX}/b/doubleAuth/login`;
+const ID_SAVE_FINGER = () => `${ID_PREFIX}/b/doubleAuth/personal/saveFinger`;
+const ID_INFO_APP_FORM = () => `${ID_PREFIX}/do/off/ui/auth/login/form/10000ea055dd8d81d09d5a1ba55d39ad/0`;
 const GET_COOKIE_URL = WEBVPN_PREFIX +
   '/wengine-vpn/cookie?method=get&host=info.tsinghua.edu.cn&scheme=https&path=/f/info/gxfw_fg/common/index';
 const INFO_PREFIX = WEBVPN_PREFIX +
   '/https/77726476706e69737468656265737421f9f9479369247b59700f81b9991b2631506205de';
-const ROAMING_URL = INFO_PREFIX + '/b/yyfw/vyyfwxx/info/portal_fg/common/onlineAppRedirect';
+const ROAMING_URL = `${INFO_PREFIX}/b/yyfw/vyyfwxx/info/portal_fg/common/onlineAppRedirect`;
 const MADMODEL_VPN_PREFIX = WEBVPN_PREFIX +
   '/https/77726476706e69737468656265737421fdf6459128346d5c300b9ae28c462a3b27469fc32211fa26a3e464';
-const MADMODEL_AUTH_CHECK_URL = MADMODEL_VPN_PREFIX + '/model-api/auth-login/check?ticket=';
+const MADMODEL_AUTH_CHECK_URL = `${MADMODEL_VPN_PREFIX}/model-api/auth-login/check?ticket=`;
 const MADMODEL_ROAMING_ID = '19D04E39D96B36C494F2E48A1A4741FD';
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-
-// GBK 字节序列(id 系统页面为 gb2312,fetch 按字节读为 latin1 判读)。
-// 字节序列复刻自 THUday(由 Node TextDecoder('gbk') 预生成)。
-const GBK_PHRASES = {
-  success: [181, 199, 194, 188, 179, 201, 185, 166],              // 登录成功
-  redirecting: [213, 253, 212, 218, 214, 216, 182, 168, 207, 242], // 正在重定向
-  captcha: [209, 233, 214, 164, 194, 235],                         // 验证码
-  badCredentials: [195, 220, 194, 235, 178, 187, 213, 253, 200, 184], // 密码不正确
-  userOrPassword: [211, 195, 187, 167, 195, 251, 187, 242, 195, 220, 194, 235], // 用户名或密码
-  passwordError: [195, 220, 194, 235, 180, 237, 206, 243],        // 密码错误
-  twoFactor: [182, 254, 180, 206, 200, 207, 214, 164],            // 二次认证
-  serverError: [179, 246, 180, 237, 193, 203],                    // 出错了
-};
 
 function AuthError(message, code) {
   const error = new Error(message);
@@ -162,7 +158,7 @@ class CookieJar {
       if (seen.has(c.name)) continue;
       if (cookiePathMatches(p, c.path)) {
         seen.add(c.name);
-        parts.push(c.name + '=' + c.value);
+        parts.push(`${c.name}=${c.value}`);
       }
     }
     return parts.join('; ');
@@ -173,7 +169,7 @@ class CookieJar {
   }
 }
 
-// resolveUrl:相对/绝对跳转解析(避免依赖 URL 类的怪异形态,与 THUday 行为一致)
+// resolveUrl:相对/绝对跳转解析(避免依赖 URL 类的怪异形态)
 function resolveUrl(base, target) {
   if (!target) return base;
   if (/^https?:\/\//i.test(target)) return target;
@@ -184,14 +180,26 @@ function resolveUrl(base, target) {
   return base.replace(/[^\/]*$/, '') + target;
 }
 
-// bytes → latin1 串(ASCII 结构与 GBK 字节判读都基于此形态)
-function bufferToLatin1(buf) {
-  return Buffer.from(buf).toString('latin1');
-}
-
-function containsPhrase(latin1Text, gbkBytes) {
-  if (!latin1Text || !gbkBytes) return false;
-  return latin1Text.indexOf(String.fromCharCode.apply(null, gbkBytes)) !== -1;
+// 响应体解码。id 系统页面是 gb2312/GBK,JSON 接口是 UTF-8,而学校端点并不总是
+// 声明 charset:先按声明解,没声明就试 UTF-8——出现替换字符(U+FFFD)说明不是
+// 合法 UTF-8,退回 GBK 再解。
+// 不能像从前那样统一按 latin1 逐字节读:GBK 汉字的尾字节落在 ASCII 区间
+// (0x40-0x7E),逐字节判读会把汉字的后半截误当成结构字符;JSON 里的中文
+// (二次认证的 msg 等)也会全是乱码。中文匹配改用字面量后,手工维护的 GBK
+// 字节表连带消失——那张表里 "密码不正确" 的末字节曾错成 "雀",静默失配至今。
+function decodeBody(buf, contentType) {
+  const declared = /charset=["']?([\w-]+)/i.exec(contentType || '');
+  const label = (declared ? declared[1] : '').toLowerCase();
+  const decode = enc => {
+    try { return new TextDecoder(enc).decode(buf); } catch (e) { return null; }
+  };
+  if (label && !/^utf-?8$/.test(label)) {
+    const declaredText = decode(label);
+    if (declaredText !== null) return declaredText;
+  }
+  const utf8 = decode('utf-8');
+  if (utf8 !== null && !utf8.includes('�')) return utf8;
+  return decode('gbk') ?? utf8 ?? '';
 }
 
 function decodeHTML(html) {
@@ -200,7 +208,7 @@ function decodeHTML(html) {
     .replace(/&quot;/g, '"').replace(/&#39;/g, "'");
 }
 
-// fetch + 手动 302 跟随。返回 { statusCode, headers, body(latin1), finalUrl }。
+// fetch + 手动 302 跟随。返回 { statusCode, headers, body, finalUrl }。
 // 学校登录链的 Set-Cookie 只在逐跳可见,fetch 自动重定向会吞掉中间跳的 cookie。
 // 重定向目标限制在清华域(认证链全是校内域):防认证响应被篡改时把带
 // Cookie/票据的请求引到任意外部地址(SSRF/票据泄露面)。
@@ -219,12 +227,34 @@ function isCampusHost(url) {
   try { return REDIRECT_HOST_ALLOW.test(new URL(String(url || '')).hostname); }
   catch (e) { return false; }
 }
+// 认证链响应体上限:超时限制的是时间不是字节,异常/被攻陷的校内端点可以在
+// 超时前倾倒巨量内容把 watch 进程内存打爆。登录页/JSON 应答均在数十 KB 量级,
+// 5MB 上限余量充分;超限直接放弃(与代理侧 readLimited 同一哲学)
+const AUTH_BODY_LIMIT = 5 * 1024 * 1024;
+async function readBodyLimited(res) {
+  if (!res.body) return Buffer.alloc(0);
+  const reader = res.body.getReader();
+  const parts = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > AUTH_BODY_LIMIT) {
+      try { await reader.cancel(); } catch (e) { /* 已断 */ }
+      throw new Error(`认证响应体超过 ${AUTH_BODY_LIMIT / 1048576}MB 上限,疑似异常响应,已中止`);
+    }
+    parts.push(value);
+  }
+  return Buffer.concat(parts);
+}
+
 async function requestWithRedirects(options, jar, maxRedirects = 16) {
   let url = options.url;
   let method = options.method || 'GET';
   let data = options.data;
   for (let hops = 0; ; hops++) {
-    if (!isAllowedRedirect(url)) throw new Error('认证请求目标非清华 HTTPS 域,已中止: ' + url);
+    if (!isAllowedRedirect(url)) throw new Error(`认证请求目标非清华 HTTPS 域,已中止: ${url}`);
     const cookieHeader = jar.headerFor(url);
     const headers = {
       'User-Agent': USER_AGENT,
@@ -238,7 +268,7 @@ async function requestWithRedirects(options, jar, maxRedirects = 16) {
         if (!headers['Content-Type']) headers['Content-Type'] = 'application/x-www-form-urlencoded';
       } else {
         body = Object.keys(data)
-          .map(k => k + '=' + encodeURIComponent(data[k]))
+          .map(k => `${k}=${encodeURIComponent(data[k])}`)
           .join('&');
         if (!headers['Content-Type']) headers['Content-Type'] = 'application/x-www-form-urlencoded';
       }
@@ -255,19 +285,19 @@ async function requestWithRedirects(options, jar, maxRedirects = 16) {
       const next = resolveUrl(url, redirect);
       if (!isAllowedRedirect(next)) {
         // 首跳目标(即请求发起的域)必然合法;此处拒绝的是链中被带偏的后续跳
-        if (hops === 0) throw new Error('重定向目标非清华域: ' + next);
-        throw new Error('登录链重定向被引向校外地址,已中止(可能被篡改): ' + next);
+        if (hops === 0) throw new Error(`重定向目标非清华域: ${next}`);
+        throw new Error(`登录链重定向被引向校外地址,已中止(可能被篡改): ${next}`);
       }
       url = next;
       method = 'GET';
       data = null;
       continue;
     }
-    const buf = Buffer.from(await res.arrayBuffer());
+    const buf = await readBodyLimited(res);
     return {
       statusCode: res.status,
       headers: res.headers,
-      body: bufferToLatin1(buf),
+      body: decodeBody(buf, res.headers.get('content-type')),
       finalUrl: url,
     };
   }
@@ -296,7 +326,7 @@ class MadmodelAuthClient {
   }
 
   // ID 登录表单提交:SM2 加密密码 → POST /check → 成功页锚点。
-  // formVariant 'thuinfo':action 一律用 checkUrl(表单由 id 域提供,见 THUday 注释)。
+  // formVariant 'thuinfo':action 一律用 checkUrl(表单由 id 域提供)。
   async authenticateIdentity(formUrl, checkUrl, username, password, fingerPrint,
     twoFactorHandler, existingFormPage, formVariant) {
     const formPage = existingFormPage ||
@@ -310,7 +340,7 @@ class MadmodelAuthClient {
 
     const formData = {
       i_user: username,
-      i_pass: '04' + sm2.doEncrypt(password, pubKeyMatch[1].trim()),
+      i_pass: `04${sm2.doEncrypt(password, pubKeyMatch[1].trim())}`,
       fingerPrint: fingerPrint || '',
       fingerGenPrint: '',
       i_captcha: '',
@@ -327,22 +357,16 @@ class MadmodelAuthClient {
     let body = String(checkRes.body || '');
     const isSuccessfulBody = value =>
       (/ticket=/i.test(value) && !/ticket=BAD_CREDENTIALS/i.test(value)) ||
-      containsPhrase(value, GBK_PHRASES.success) ||
-      containsPhrase(value, GBK_PHRASES.redirecting) ||
-      value.indexOf('登录成功') !== -1;
-    const anchorBase = (checkRes && checkRes.finalUrl) || submitUrl;
+      value.includes('登录成功') || value.includes('正在重定向');
+    const anchorBase = checkRes?.finalUrl || submitUrl;
     let redirectUrl = isSuccessfulBody(body) ? firstAnchorUrl(body, anchorBase) : '';
 
     if (!redirectUrl) {
       const hasLoginErrorBox = /<form\b/i.test(body) && /msg_note/i.test(body) && !/ticket=/i.test(body);
-      const badCreds = containsPhrase(body, GBK_PHRASES.badCredentials) ||
-        containsPhrase(body, GBK_PHRASES.userOrPassword) ||
-        containsPhrase(body, GBK_PHRASES.passwordError) ||
-        body.indexOf('密码不正确') !== -1 ||
+      const badCreds = body.includes('密码不正确') || body.includes('用户名或密码') ||
+        body.includes('密码错误') ||
         /ticket=BAD_CREDENTIALS/i.test(body) || hasLoginErrorBox;
-      let twoFactorSignal = containsPhrase(body, GBK_PHRASES.twoFactor) ||
-        body.indexOf('二次认证') !== -1 || containsPhrase(body, GBK_PHRASES.captcha) ||
-        body.indexOf('验证码') !== -1;
+      let twoFactorSignal = body.includes('二次认证') || body.includes('验证码');
       let approaches = null;
       if (badCreds) throw AuthError('学号或密码不正确,请检查后重试', 'BAD_CREDENTIALS');
       if (!twoFactorSignal && checkRes.statusCode === 200 && typeof twoFactorHandler === 'function') {
@@ -356,16 +380,16 @@ class MadmodelAuthClient {
           throw AuthError('学校要求二次认证(新设备验证),需要人工介入', 'TWO_FACTOR_REQUIRED');
         }
         body = await this.completeTwoFactor(fingerPrint, twoFactorHandler, approaches);
-        redirectUrl = isSuccessfulBody(body) ? firstAnchorUrl(body, ID_PREFIX + '/') : '';
+        redirectUrl = isSuccessfulBody(body) ? firstAnchorUrl(body, `${ID_PREFIX}/`) : '';
       }
     }
 
     if (!redirectUrl) {
-      if (containsPhrase(body, GBK_PHRASES.serverError)) {
+      if (body.includes('出错了')) {
         throw AuthError('学校服务处理出错,请稍后重试', 'SERVER_ERROR');
       }
-      throw AuthError('登录失败(HTTP ' + checkRes.statusCode + ',响应 ' +
-        String(body || '').slice(0, 80).replace(/\s+/g, ' ') + '…)', 'LOGIN_FAILED');
+      throw AuthError(`登录失败(HTTP ${checkRes.statusCode},响应 ` +
+        `${String(body || '').slice(0, 80).replace(/\s+/g, ' ')}…)`, 'LOGIN_FAILED');
     }
     return { body, redirectUrl, anchorBase };
   }
@@ -376,7 +400,7 @@ class MadmodelAuthClient {
     }, this.jar);
     let json;
     try { json = JSON.parse(res.body || '{}'); } catch (e) {
-      throw AuthError(fallbackMessage + ':学校返回了无法识别的数据', 'TWO_FACTOR_INVALID_RESPONSE');
+      throw AuthError(`${fallbackMessage}:学校返回了无法识别的数据`, 'TWO_FACTOR_INVALID_RESPONSE');
     }
     if (res.statusCode !== 200 || json.result !== 'success') {
       throw AuthError(json.msg || fallbackMessage, 'TWO_FACTOR_FAILED');
@@ -434,7 +458,7 @@ class MadmodelAuthClient {
       throw AuthError('学校验证成功但未返回登录跳转地址', 'TWO_FACTOR_NO_REDIRECT');
     }
     const completed = await requestWithRedirects({
-      url: resolveUrl(ID_PREFIX + '/', redirectUrl),
+      url: resolveUrl(`${ID_PREFIX}/`, redirectUrl),
     }, this.jar);
     return completed.body;
   }
@@ -454,8 +478,8 @@ class MadmodelAuthClient {
       // 仅为防御(通常已经正确)。
       if (!/^https:\/\/id\.tsinghua\.edu\.cn\//i.test(oauth.finalUrl || '')) {
         const webvpnFormSession = this.jar.valueFor(WEBVPN_OAUTH_LOGIN(), 'JSESSIONID');
-        if (webvpnFormSession && !this.jar.valueFor(ID_PREFIX + '/', 'JSESSIONID')) {
-          this.jar.absorb(ID_PREFIX + '/', 'JSESSIONID=' + webvpnFormSession + '; Path=/');
+        if (webvpnFormSession && !this.jar.valueFor(`${ID_PREFIX}/`, 'JSESSIONID')) {
+          this.jar.absorb(`${ID_PREFIX}/`, `JSESSIONID=${webvpnFormSession}; Path=/`);
           console.warn('[WebVPN] ID 表单会话 cookie 已归位到 id 域');
         }
       }
@@ -485,7 +509,8 @@ class MadmodelAuthClient {
     } catch (e) { return false; }
   }
 
-  // oauth 域锚点 → lb-auth/lbredirect 形式(uri 不编码,与 thu-info-lib 一致)
+  // oauth 域锚点 → lb-auth/lbredirect 形式(uri 不编码)。URL 形式对齐
+  // thu-info-lib 的公开行为——是学校接口的协议事实,非代码引用(BSL,未引用)
   toLbRedirectUrl(urlIn) {
     const value = String(urlIn || '');
     if (/oauth\.tsinghua\.edu\.cn/i.test(value)) return value;
@@ -495,8 +520,8 @@ class MadmodelAuthClient {
     const host = m[2];
     const port = m[3] || (scheme === 'https' ? '443' : '80');
     const uri = (m[4] || '/') + (m[5] || '') + (m[6] || '');
-    return 'https://oauth.tsinghua.edu.cn/lb-auth/lbredirect?scheme=' + scheme +
-      '&host=' + host + '&port=' + port + '&uri=' + uri;
+    return 'https://oauth.tsinghua.edu.cn/lb-auth/lbredirect' +
+      `?scheme=${scheme}&host=${host}&port=${port}&uri=${uri}`;
   }
 
   // ID 漫游到 info 门户:建立门户侧会话,否则漫游接口不返回 roamingurl。
@@ -514,8 +539,7 @@ class MadmodelAuthClient {
       throw AuthError('info 门户漫游未返回跳转地址', 'WEBVPN_INFO_ROAM_EMPTY');
     }
     const targetUrl = this.toLbRedirectUrl(identity.redirectUrl);
-    // 打日志前先剥掉 ticket/_csrf 等敏感查询参数(截断到 100 字符只是巧合性地
-    // 落在 ticket 前,不构成防护;显式脱敏才是)
+    // 打日志前显式剥掉 ticket/_csrf 等敏感查询参数(不能靠截断长度来"碰巧"截掉)
     console.warn('[WebVPN] info 漫游跟随', String(targetUrl)
       .replace(/([?&])(ticket|_csrf|oauth_token)=[^&]*/gi, '$1$2=***')
       .slice(0, 120));
@@ -552,7 +576,7 @@ class MadmodelAuthClient {
     let pageCsrf = '';
     try {
       const idx = await requestWithRedirects({
-        url: INFO_PREFIX + '/f/info/gxfw_fg/common/index',
+        url: `${INFO_PREFIX}/f/info/gxfw_fg/common/index`,
       }, this.jar, 12);
       const m = /_csrf=([\w-]+)/.exec(String(idx.body || ''));
       if (m) pageCsrf = m[1];
@@ -591,7 +615,7 @@ class MadmodelAuthClient {
     let value = decodeHTML(String(url || '')).replace(/&amp;/g, '&');
     const vpnPrefix = /^https:\/\/webvpn\.tsinghua\.edu\.cn\/https\/([0-9a-f]+)\//i.exec(value);
     if (vpnPrefix) {
-      value = 'https://' + Buffer.from(vpnPrefix[1], 'hex').toString('utf8');
+      value = `https://${Buffer.from(vpnPrefix[1], 'hex').toString('utf8')}`;
     }
     return value;
   }
@@ -602,11 +626,11 @@ class MadmodelAuthClient {
       credentials.twoFactorHandler);
     const doRoam = async () => {
       const response = await requestWithRedirects({
-        url: ROAMING_URL + '?yyfwid=' + encodeURIComponent(payload) +
-          '&_csrf=' + encodeURIComponent(this.portalCsrf) + '&machine=p',
+        url: `${ROAMING_URL}?yyfwid=${encodeURIComponent(payload)}` +
+          `&_csrf=${encodeURIComponent(this.portalCsrf)}&machine=p`,
       }, this.jar, 12);
       if (response.statusCode !== 200) {
-        throw AuthError(label + '漫游失败(HTTP ' + response.statusCode + ')', 'THUINFO_ROAM_HTTP');
+        throw AuthError(`${label}漫游失败(HTTP ${response.statusCode})`, 'THUINFO_ROAM_HTTP');
       }
       return response.body;
     };
@@ -616,9 +640,9 @@ class MadmodelAuthClient {
     if (json && json.object && json.object.roamingurl) {
       return this.mapRoamingUrl(json.object.roamingurl);
     }
-    // 无 roamingurl:门户会话缺失,强制重建后重试(THUday 已验证的模式)
+    // 无 roamingurl:门户会话缺失,强制重建后重试(实测验证的模式)
     const keys = json ? Object.keys(json).join(',') : '非JSON';
-    console.warn('[thuInfo] ' + label + '漫游无跳转地址,重建会话后重试(响应键=' + keys + ')');
+    console.warn(`[thuInfo] ${label}漫游无跳转地址,重建会话后重试(响应键=${keys})`);
     this.portalCsrf = '';
     await this.establishWebVpnSession(
       credentials.username, credentials.password, credentials.fingerPrint,
@@ -690,5 +714,10 @@ module.exports = {
   generateFingerprint,
   AuthError,
   requestWithRedirects,
+  // 以下为纯逻辑,导出供 test-auth.js 离线测试(认证链无法端到端测试,
+  // 但这些判定函数是它出错概率最高的地方)
+  decodeBody,
+  resolveUrl,
+  isAllowedRedirect,
 };
 

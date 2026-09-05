@@ -1,18 +1,14 @@
 // creds.js
 // 凭据存储:清华学号 + 密码 + 设备指纹。密码用 Windows DPAPI 加密
-// (CurrentUser 范围),密文只对当前 Windows 账户可解。文件位于
-// %USERPROFILE%\.dsh-madmodel\creds.json。
+// (CurrentUser 范围),密文只对当前 Windows 账户可解。
 
 'use strict';
 
 const fs = require('fs');
-const path = require('path');
 const { generateFingerprint } = require('./madmodel-auth');
 const { dpapiProtect, dpapiUnprotect } = require('./secure-store');
-
-const CREDS_DIR = path.join(process.env.USERPROFILE || '', '.dsh-madmodel');
-// MADMODEL_CREDS_FILE:测试注入用,避免测试触碰真实凭据
-const CREDS_FILE = process.env.MADMODEL_CREDS_FILE || path.join(CREDS_DIR, 'creds.json');
+const { atomicWrite } = require('./atomic-file');
+const { CREDS_FILE } = require('./paths');
 
 function loadCreds() {
   if (!fs.existsSync(CREDS_FILE)) return null;
@@ -33,18 +29,13 @@ function loadCreds() {
 }
 
 function saveCreds(username, password, fingerPrint) {
-  fs.mkdirSync(path.dirname(CREDS_FILE), { recursive: true });
   const record = {
     username,
     passwordCipher: dpapiProtect(password),
     fingerPrint: fingerPrint || generateFingerprint(),
     updatedAt: new Date().toISOString(),
   };
-  // 原子写:先写同目录临时文件再改名,读方不会拿到半截 JSON
-  const tmp = CREDS_FILE + '.' + process.pid + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(record, null, 2), 'utf8');
-  fs.chmodSync(tmp, 0o600); // POSIX 语义;Windows 下基本为 no-op,无害
-  fs.renameSync(tmp, CREDS_FILE);
+  atomicWrite(CREDS_FILE, JSON.stringify(record, null, 2));
   // 密码只进内存与 DPAPI 密文
   return {
     username: record.username,
@@ -58,4 +49,3 @@ function hasCreds() {
 }
 
 module.exports = { loadCreds, saveCreds, hasCreds, CREDS_FILE };
-

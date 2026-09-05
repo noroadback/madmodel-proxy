@@ -15,7 +15,10 @@ madmodel（`madmodel.cs.tsinghua.edu.cn`，清华大学高性能计算中心部�
 - **完整统一认证自动化**：SM2 密码加密（强制 CSPRNG，不可用则拒绝加载）、二次认证（微信/短信/TOTP）、可信设备登记（登记后续期免二次认证）
 - **静态数据加密**：密码与 token 均以 Windows DPAPI（CurrentUser）加密存储，密钥不出 Windows 账户
 - **本地安全**：Bearer 鉴权（默认强制，自动生成 key）+ Host 白名单（防 DNS rebinding）+ 请求/响应多重限额与超时 + 客户端断连即中止上游
-- **离线测试套件**：假上游 + 子进程，24 项端到端，不需要账号、不触网
+- **单窗口运行**：start.cmd 经 dashboard.js 同窗拉起守护与代理，`[代理]`/`[watch]` 前缀区分日志，Ctrl+C/关窗全停
+- **真实 usage**：对上游注入 `include_usage`（上游默认不回 usage），非流式聚合与流式透传均带真实 token 数，`reasoning_tokens` 单独可见
+- **参数归一化**：模型名重写、剥离上游拒绝的参数（`logprobs` 等）、把三种"关闭推理"方言统一映射到上游唯一生效的写法——客户端不必为这个端点特调
+- **离线测试套件**：假上游 + 子进程,107 项端到端与单元测试,不需要账号、不触网
 
 ## 测试状态
 
@@ -26,9 +29,14 @@ madmodel（`madmodel.cs.tsinghua.edu.cn`，清华大学高性能计算中心部�
 前置条件：Windows 10/11 · Node.js ≥ 18.14 · 清华统一认证账号
 
 ```bat
-node refresh-token.js login    :: 输入学号+密码(首次含二次认证,只需一次)
-start.cmd                       :: 拉起续期守护 + 代理(双击即可)
-node refresh-token.js key       :: 打印 API key(只生成一次,之后固定)
+rem 1. 首次配置:输入学号+密码(首次含二次认证,只需一次)
+node refresh-token.js login
+rem 2. 启动:单窗口拉起续期守护 + 代理(双击 start.cmd 亦可)
+start.cmd
+rem 3. 随时查看运行状态:代理/token/watch/key 一屏汇总(双击 status.cmd 亦可)
+node refresh-token.js status
+rem 4. 打印 API key(配置客户端用,只生成一次,之后固定)
+node refresh-token.js key
 ```
 
 在 dsh（或其他 OpenAI 客户端）中配置：
@@ -49,18 +57,26 @@ node refresh-token.js key       :: 打印 API key(只生成一次,之后固定)
 | `PROXY_NO_AUTH` | 关 | `=1` 关闭本地鉴权（仅测试场景） |
 | `PROXY_PORT` | `8080` | 监听端口 |
 | `PROXY_NO_GZIP` | 关 | `=1` 关闭发往上游的请求体 gzip 编码 |
-| `DUMP_FAILED` | 关 | `=1` 失败请求体落盘至 `%USERPROFILE%\.dsh-madmodel\`(含完整对话内容,隐私,默认关) |
+| `PROXY_STREAM_TOTAL_MS` | 1200000 | 单次流式请求总时限（毫秒），一般无需修改 |
+| `DUMP_FAILED` | 关 | `=1` 时**上游拒绝**(可解析的上游错误)的请求体落盘至 `%USERPROFILE%\.dsh-madmodel\`(含完整对话内容,隐私;网络错误/超时/流截断不落盘) |
 | `PROXY_UPSTREAM` / `PROXY_TOKEN_FILE` | 真实值 | 测试注入用（指向本地假上游/假 token） |
 
 ## 架构
 
 ```
-start.cmd
+start.cmd → dashboard.js(单窗口:前缀交错显示,Ctrl+C/关窗全停)
  ├─ refresh-token.js watch   token 续期守护(单实例锁,死 PID 自动接管)
  └─ proxy.js                 OpenAI 兼容代理(127.0.0.1,Host 白名单 + Bearer 鉴权)
        │
        └─ 唯一耦合点: ~/.dsh-madmodel/token.json
           (DPAPI 加密,临时文件+rename 原子写,读方按 mtime 缓存热加载)
+
+共用模块:
+  madmodel-auth.js  统一认证 → WebVPN → info 门户漫游 → madmodel token 全链
+  creds.js          学号/密码/设备指纹存取(DPAPI)
+  secure-store.js   token 存取(DPAPI)
+  atomic-file.js    原子写 / 独占安装 / 单写者文件争用仲裁
+  paths.js          状态文件路径 + 本地鉴权 key 优先级(唯一来源)
 ```
 
 **两个进程是有意拆分的**：
@@ -68,7 +84,7 @@ start.cmd
 - **凭据隔离**——代理进程从不读取 creds.json、从不解密密码；处理网络输入的进程与最高敏感凭据分属不同进程边界；
 - **爆炸半径**——续期链路（子进程、学校服务、网络重试）是全项目最脆弱的部分，与请求服务循环隔离，登录链崩溃不影响进行中的流式请求。
 
-代价是需要锁文件与双窗口编排，详见源码注释。
+代价是需要锁文件与进程编排，详见源码注释。dashboard.js 是纯编排器：两个子进程仍是完全独立的进程，上述拆分理由全部成立；调试时可绕过它分别运行 `node refresh-token.js watch` 与 `node proxy.js`（行为与从前一致）。
 
 ## 安全设计
 
@@ -83,6 +99,10 @@ start.cmd
 | 随机数 | SM2 熵池强制接 Node WebCrypto CSPRNG，不可用即拒绝启动 |
 | 出站安全 | 登录链重定向仅跟随 `https://*.tsinghua.edu.cn`，被引向校外即中止 |
 
+**威胁画像**：本代理只监听 127.0.0.1，能触达它的只有本机进程与浏览器页面。日常使用中真正高频的对手是**不可靠的上游**（网关断流、连接悬挂）与**失控的客户端**（agent 重试风暴、超大请求体）——上表"防资源耗尽 / 防内存耗尽"两层在实际运营中主要服务于后者；面向攻击者的层（鉴权、Host 白名单）针对的是恶意网页盲调等低频但真实的场景。防御触发会留痕：含 401/403/413/429 在内的早退请求同样进访问日志，事后可查"有没有进程在打我、限速挡掉了多少"。
+
+**DPAPI 的覆盖面**：CurrentUser 范围的 DPAPI 防的是**文件离开本机或当前 Windows 账户**（磁盘被离线挂载、U 盘拷贝、网盘同步快照）；它**不防**以当前用户身份运行的代码——后者一次系统调用即可解密，用户态无解，对这类威胁本项目的相关控制是架构层的进程隔离（代理进程从不读取 creds.json）。`api-key` 文件为明文是有意取舍：它需要人工抄进客户端配置、离开本机即无用、且受用户目录 ACL 保护。
+
 ## 设计取舍与已知限制
 
 - **仅限 Windows**：凭据/token 存储用 DPAPI（PowerShell 桥接）；
@@ -91,19 +111,37 @@ start.cmd
 - 单模型（`DeepSeek-V4-Flash`）；限速参数按个人自用设计；
 - watch 被强杀（任务管理器）后锁文件残留，下次启动自动探活接管（Windows 信号处理限制，见源码注释）。
 
+## Roadmap(欢迎贡献)
+
+1. **测试迁移到 `node:test`**——当前断言为顺序脚本,迁移后获得用例隔离、失败即停与 TAP 输出(零依赖不变,Node 原生);
+2. **跨平台(Windows 优先的取舍)**——secrets 三平台后端(参考 learnX/thu-info-app 的钥匙串实践);
+3. **更多客户端实测**——codex / claude code 等,补 `docs/connect-*.md`。
+
+已完成(见 [CHANGELOG.md](CHANGELOG.md)):`atomic-file.js` 原子文件原语抽取、`paths.js` 路径与鉴权优先级统一、流式/非流式结果分派合并、请求参数归一化、认证链离线测试、注释收敛与代码风格现代化。
+
 ## 已知兼容性问题:请求体压缩与上游 WAF 误报
 
 上游 madmodel 前置的 WAF 存在**误报**:其 SQL 注入特征规则会拦截请求体明文中包含字面量 `"(set "` 的请求(该字面量常见于 agent 工具的系统提示词,如 dsh 的 `"(set wait: true)"` 工具语法)——对 JSON 对话体而言这是误判。
 
 本代理默认对发往上游的请求体做 gzip 编码(`Content-Encoding: gzip`,标准 HTTP 特性,带宽上也是优化;`PROXY_NO_GZIP=1` 可关闭)。上游 WAF 对压缩后的请求体不再触发上述规则,上游服务本身正常处理压缩请求并返回结果。
 
-关于安全中立性:gzip 编码**不改变任何权限边界**——请求仍携带使用者本人的 token,仍受上游鉴权与配额约束,改变仅在于 body 的传输编码形态;被触发的是一条对 JSON 对话体误判的注入特征规则。这属于灰色手段,作者不建议视为长期方案:受影响的用户应向学校信息化服务平台反馈该误报,推动根因修复。如上游修复误报或调整策略,直接设 `PROXY_NO_GZIP=1` 关闭即可。
+关于安全中立性:gzip 编码**不改变任何权限边界**——请求仍携带使用者本人的 token,仍受上游鉴权与配额约束,改变仅在于 body 的传输编码形态;被触发的是一条对 JSON 对话体误判的注入特征规则。作者不建议视为长期方案:受影响的用户应向学校信息化服务平台反馈该误报,推动根因修复。如上游修复误报或调整策略,直接设 `PROXY_NO_GZIP=1` 关闭即可。
+
+## 已验证的上游行为(2026-09 实测)
+
+- **`logprobs` 参数会被网关拒绝**,且表现为流内"服务器繁忙"。代理默认剥离该参数(需要概率输出的评测工具在此端点仍然不可用)。
+- **部分错误以 200 + SSE 流内嵌 `{"errorMessage":"..."}` 返回**("模型不存在"、瞬时繁忙等)。代理会识别并翻译:非流式请求收到 502/429 与原文;流式请求因响应头已发出只能断流,访问日志记录 `stream-aborted` 与错误原文。
+- **负载均衡器会直接返回 HTML 502 错误页**(TsinghuaLB,后端瞬时不可达时出现)。代理识别并翻译为明确文案,客户端重试通常自愈。
+- **`usage` 仅在请求携带 `stream_options.include_usage` 时返回**(含 `reasoning_tokens` 单独计数)。代理默认注入,客户端拿到的即真实用量。
+- **模型名精确匹配 `DeepSeek-V4-Flash`**,缺失或拼错 → "模型不存在"。代理会把任意模型名重写为它。
+- **流中会夹带空数据帧**(`data:` 空行,网关心跳;2026-09-05 实测,曾致坏帧误判)。代理容忍空帧,非空坏帧仍按协议错误终止。
+- **思考控制**:官方 API 方言(`thinking`/`reasoning_effort`)无效;仅 vLLM 方言 `chat_template_kwargs: {"thinking": false}` 能关闭推理(上游默认全开)。代理会把前两种方言的"关闭"意图映射到后者。
 
 ## 合规声明
 
 - 本工具**仅供清华大学师生在遵守学校相关规定的前提下个人使用**;使用者对自己的账号与配额负责。
 - 本工具不提供、不代理任何配额共享;所有请求均使用使用者本人的统一认证凭据。
-- 除"已知兼容性问题"一节披露的 WAF 误报规避(gzip 编码)外,本工具不绕过任何访问控制。
+- 本工具**不绕过任何鉴权与配额类访问控制**;唯一例外是"已知兼容性问题"一节披露的 WAF **内容检查**误报规避(gzip 编码,针对误报的临时手段,`PROXY_NO_GZIP=1` 可关闭)。
 - 请勿将本工具用于共享账号、转售配额或任何服务他人的用途。
 
 ## 测试
@@ -112,12 +150,18 @@ start.cmd
 npm test
 ```
 
-`test-creds.js`（DPAPI 往返）+ `test-proxy.js`（24 项离线端到端：假上游 + 子进程代理，覆盖鉴权、Host 白名单、SSE 透传/聚合、错误翻译、超限、断连中止等；全程不触网、不需要账号）。
+全程离线（不需要账号、不触网）。另有 `npm run smoke`——**真实流量冒烟**（需代理在线与有效 token，消耗少量配额）：离线套件只能覆盖*已知*的上游帧型，空心跳帧这类行为只有真实流量能暴露（2026-09-05 曾因此事故）。**凡是改动 SSE 解析/错误处理/超时等协议行为，改完先跑冒烟再算完成**。
+
+三个文件、107 项断言,全程离线:
+
+- `test-creds.js`——DPAPI 加解密往返(非 Windows 自动跳过);
+- `test-auth.js`(38 项)——认证链纯逻辑:响应体 charset 解码与嗅探回退、重定向白名单(含 userinfo 伪装绕过尝试)、CookieJar 路径匹配与合并 Set-Cookie 切分、JWT 过期兜底、WebVPN URL 改写;
+- `test-proxy.js`(69 项)——假上游 + 子进程代理端到端:鉴权、Host 白名单、SSE 透传/聚合、错误翻译、SSE 内嵌错误与 HTML 错误页翻译、流截断不伪装成功、坏帧不静默跳过、空数据帧容忍、大块合法行不误触上限、`[DONE]` 后挂起不泄漏连接、周期心跳与慢速 JSON 的总时限、超限、断连中止、并发上限、早退日志留痕、usage 注入、参数归一化、干净目录 bootstrap、坏锁/空锁恢复、key 命令与环境变量一致性。
 
 ## 致谢
 
-- [`sm2.js`](sm2.js):vendored [sm-crypto](https://github.com/JuneAndGreen/sm-crypto) v0.3.13(MIT,内含 jsbn 衍生代码),许可声明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md);
-- 统一认证登录协议:SM2 登录参考 MIT 许可的 [thu-learn-lib](https://github.com/robertying/thu-learn-lib)(Harry Chen);表单与可信设备协议知识参考 [learnX](https://github.com/robertying/learnX)(Rui Ying,MIT);二次认证流程参考 thu-info-app 的公开行为。以上均为**协议级参考**,本仓库代码为独立实现。
+- [`sm2.js`](sm2.js):vendored [sm-crypto](https://github.com/JuneAndGreen/sm-crypto) v0.3.13(MIT,内含 jsbn 衍生代码),许可声明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md);与上游 `dist/sm2.js` 逐字节相同,核验:`tail -c 36233 sm2.js | sha256sum`(期望值记于文件头部);
+- 统一认证登录协议:SM2 登录参考 MIT 许可的 [thu-learn-lib](https://github.com/robertying/thu-learn-lib)(Harry Chen);表单与可信设备协议知识参考 [learnX](https://github.com/robertying/learnX)(Rui Ying,MIT);二次认证流程参考 thu-info-app 的公开行为。以上均为**协议级参考**,本仓库代码为独立实现;thu-info-app 的协议库 [@thu-info/lib](https://www.npmjs.com/package/@thu-info/lib) 为 BSL 1.1 许可,与 MIT 不兼容,本项目未引用其任何代码。
 
 ## 安全说明
 
@@ -126,3 +170,7 @@ npm test
 ## 许可证
 
 [MIT](LICENSE)
+
+## 变更日志
+
+[CHANGELOG.md](CHANGELOG.md)
