@@ -1,0 +1,28 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        node: [18, 20, 22, 24]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      # 语法门:覆盖测试不会加载的文件(dashboard.js / smoke-real.js)。
+      # 用 node --check 而非 eslint,以保持"零 npm 依赖,clone 即用"
+      - name: Syntax check
+        run: node -e "for (const f of require('fs').readdirSync('.').filter(f => f.endsWith('.js'))) require('child_process').execFileSync(process.execPath, ['--check', f], { stdio: 'inherit' })"
+      # 与 README 同一入口:test-creds 自识别平台(非 Windows 跳过 DPAPI 部分),
+      # test-proxy 全平台运行(全离线,同时验证零依赖宣称的真实性)
+      - name: Run tests
+        run: npm test
