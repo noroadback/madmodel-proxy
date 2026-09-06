@@ -2,6 +2,12 @@
 
 把清华 madmodel 服务变成一个**本机常驻的 OpenAI 兼容端点**。
 
+> **项目定位(先读这个再决定是否使用)**
+> - **Windows 专用**:凭据与 token 静态加密依赖 Windows DPAPI,完整功能仅在 Windows 10/11 上可用;
+> - **清华 madmodel 服务专用**:登录链、上游端点、SSE 帧型均实测于 `madmodel.cs.tsinghua.edu.cn` 及清华统一认证(2026-09);
+> - **本地代理**:监听 `127.0.0.1:8080`,面向本机 OpenAI 兼容客户端,不是服务端部署方案;
+> - **不保证适用于其他认证系统或其他上游服务**——学校端点改版即失效(失效时会给出明确错误,欢迎提 issue)。
+
 madmodel（`madmodel.cs.tsinghua.edu.cn`，清华大学高性能计算中心部署的 DeepSeek 服务）只有网页形态、API token 约 5 小时过期，标准 OpenAI 客户端无法直接使用。本工具做三次"翻译"：
 
 1. **形态翻译**：网页态服务 → 标准 OpenAI API（强制流式绕上游 60s 超时、非流式聚合、错误翻译、伪造 `/v1/models`）；
@@ -18,15 +24,20 @@ madmodel（`madmodel.cs.tsinghua.edu.cn`，清华大学高性能计算中心部�
 - **单窗口运行**：start.cmd 经 dashboard.js 同窗拉起守护与代理，`[代理]`/`[watch]` 前缀区分日志，Ctrl+C/关窗全停
 - **真实 usage**：对上游注入 `include_usage`（上游默认不回 usage），非流式聚合与流式透传均带真实 token 数，`reasoning_tokens` 单独可见
 - **参数归一化**：模型名重写、剥离上游拒绝的参数（`logprobs` 等）、把三种"关闭推理"方言统一映射到上游唯一生效的写法——客户端不必为这个端点特调
-- **离线测试套件**：假上游 + 子进程,107 项端到端与单元测试,不需要账号、不触网
+- **离线测试套件**：假上游 + 子进程,177 项端到端与单元测试,不需要账号、不触网
 
 ## 测试状态
 
 已在 Windows 11 + Node.js 24 + **dsh**（DeepSeek Harness）实测通过。代理对客户端只暴露标准 OpenAI 协议，其他 OpenAI 兼容客户端理论上同样可用，但**未逐一验证**——欢迎在 issue 中附上你的客户端与结果。
 
-## 快速开始
+## 运行前提与平台支持
 
-前置条件：Windows 10/11 · Node.js ≥ 18.14 · 清华统一认证账号
+- **完整功能(代理 + 续期守护)当前只支持 Windows 10/11**:凭据与 token 的静态加密依赖 Windows DPAPI(`platform/windows/`),本项目不做跨平台明文回退;
+- **Linux/macOS 不属于正式支持平台**:只能运行不依赖 DPAPI 的纯逻辑离线测试(`npm test` 中 DPAPI 相关部分自识别跳过),不能跑代理与续期;
+- **Node.js >= 18.14**;
+- **清华统一认证账号**(且你遵守学校对该服务与配额的相关规定)。
+
+## 快速开始
 
 ```bat
 rem 1. 首次配置:输入学号+密码(首次含二次认证,只需一次)
@@ -57,26 +68,73 @@ node refresh-token.js key
 | `PROXY_NO_AUTH` | 关 | `=1` 关闭本地鉴权（仅测试场景） |
 | `PROXY_PORT` | `8080` | 监听端口 |
 | `PROXY_NO_GZIP` | 关 | `=1` 关闭发往上游的请求体 gzip 编码 |
+| `PROXY_REFRESH_AHEAD_MS` | 1800000 | 提前续期窗口，正整数毫秒 |
+| `PROXY_NO_TOKEN_WAIT_MS` | 60000 | 无凭据时的兜底检查间隔，正整数毫秒 |
+| `PROXY_MAX_SLEEP_MS` | 3600000 | 检查时钟或补偿丢失文件事件的最长等待，正整数毫秒 |
 | `PROXY_STREAM_TOTAL_MS` | 1200000 | 单次流式请求总时限（毫秒），一般无需修改 |
 | `DUMP_FAILED` | 关 | `=1` 时**上游拒绝**(可解析的上游错误)的请求体落盘至 `%USERPROFILE%\.dsh-madmodel\`(含完整对话内容,隐私;网络错误/超时/流截断不落盘) |
 | `PROXY_UPSTREAM` / `PROXY_TOKEN_FILE` | 真实值 | 测试注入用（指向本地假上游/假 token） |
+
+## 安全提示(配置前必读)
+
+- **`api-key` 文件是明文保存**(位于 `%USERPROFILE%\.dsh-madmodel\api-key`):它需要人工抄进客户端配置、离开本机即无用,这是有意取舍;文件受用户目录 ACL 保护,但请勿把它提交到任何仓库或截图外发;
+- **不要设置 `PROXY_NO_AUTH=1` 后监听非本机地址**:`PROXY_NO_AUTH` 本为离线测试而设,关闭鉴权后任何能触达该端口的进程都可匿名消耗你的配额。代理硬编码只监听 `127.0.0.1`,请保持这一边界;
+- **`DUMP_FAILED=1` 会保存完整请求体到 `%USERPROFILE%\.dsh-madmodel\last-failed-request.json`**:其中包含完整对话内容,属于隐私数据,排障后请及时删除,更不要提交或外发该文件。
+
+更多数据流向(什么数据去了哪、没去哪)见 [SECURITY.md](SECURITY.md)。
+
+## 常见故障排查
+
+| 现象 | 原因与处理 |
+|---|---|
+| 请求 401 `token 已过期` | watch 续期守护未运行或续期失败。先 `node refresh-token.js status` 查看 watch 与 token 状态;watch 未运行就用 `start.cmd` 启动,续期失败按日志里的错误码处理(见下) |
+| 请求 401 `无效或缺失 API key` | 客户端 Bearer key 与代理不一致。`node refresh-token.js key` 重新查看,粘贴进客户端配置;注意 `PROXY_API_KEY` 环境变量优先于 key 文件 |
+| 启动报 `端口 8080 已被占用` | 代理已在运行(start.cmd 重复启动),或端口被其他程序占用。确认是旧实例后直接复用;确需另开实例用 `PROXY_PORT` 换端口 |
+| 上游 401(认证失败) | token 失效但代理尚未感知。等 watch 续期完成(日志出现"token 已热加载"),或手动 `node refresh-token.js once` |
+| 上游 429(限流/繁忙) | 上游服务繁忙、上下文逼近 256K、或请求体超限。压缩上下文后重试;若客户端并发/重试过猛,靠客户端自身的退避收敛(代理业务层不限并发) |
+| 上游 502(网关/断流) | 校方网关瞬时不可达(实测 TsinghuaLB 502),通常自愈;持续出现请检查网络与学校服务状态,并提 issue 附日志 |
+| token 长期无人续期 | `TWO_FACTOR_REQUIRED`(可信设备登记失效)需手动跑一次 `login`;`BAD_CREDENTIALS` 连续三次会停守护,改密码后需重新 `login` |
+
+`status.cmd` / `node refresh-token.js status` 是以上所有排查的第一入口(代理/token/watch/key 一屏汇总)。
+
+## 自动续期
+
+守护进程按 token 的到期时间计算续期窗口，默认在剩余 30 分钟时刷新。等待期间监听 token 和凭据所在目录；文件创建、删除或原子替换会立即唤醒，重新读取状态并计算下一次等待时间。临时文件和锁文件变化不会触发唤醒。
+
+认证失败后按 1、5、15、30 分钟退避，文件事件可以提前触发状态检查，但不会绕过认证重试截止时间。成功续期后重新计算窗口；新 token 有效期过短时，至少间隔 1 分钟再尝试。目录监听不可用时保留定时检查。
+
+更新代码后需重启现有 watch 进程才能使用新调度逻辑。
 
 ## 架构
 
 ```
 start.cmd → dashboard.js(单窗口:前缀交错显示,Ctrl+C/关窗全停)
  ├─ refresh-token.js watch   token 续期守护(单实例锁,死 PID 自动接管)
- └─ proxy.js                 OpenAI 兼容代理(127.0.0.1,Host 白名单 + Bearer 鉴权)
+ │     └─ adapters/cli.js 命令分发 → auth-service.js 认证业务
+ │           └─ core/scheduler.js 续期状态机(WAITING/REFRESHING/BACKOFF/STOPPED)
+ └─ proxy.js                 启动入口:组装 config + core + adapters 并监听
+       └─ adapters/http-server.js   HTTP 适配:路由/Host+Bearer 鉴权/请求体读取/
+       │                          响应写出/token 热加载缓存
+             └─ core/proxy-service.js  业务流程:认证→归一化→上游→映射→响应
+                   ├─ core/upstream-client.js     上游调用(单 AbortController,
+                   │                              header/idle/total 统一超时清理)
+                   ├─ core/stream-parser.js        SSE 协议解析(含 UTF-8 解码)
+                   ├─ core/completion-aggregator.js 非流式聚合
+                   ├─ core/payload.js              请求解析与参数归一化
+                   └─ core/errors.js               错误映射(上游错误/结果→状态码)
        │
        └─ 唯一耦合点: ~/.dsh-madmodel/token.json
           (DPAPI 加密,临时文件+rename 原子写,读方按 mtime 缓存热加载)
 
-共用模块:
-  madmodel-auth.js  统一认证 → WebVPN → info 门户漫游 → madmodel token 全链
-  creds.js          学号/密码/设备指纹存取(DPAPI)
-  secure-store.js   token 存取(DPAPI)
-  atomic-file.js    原子写 / 独占安装 / 单写者文件争用仲裁
+分层规则:core/ 不读环境变量、不碰文件系统、不依赖 Windows API、不写 HTTP
+响应;platform/ 收拢 DPAPI 凭据、路径、原子文件、进程锁与目录监听;
+adapters/ 只做 HTTP 与终端 I/O。
+
+platform/:
   paths.js          状态文件路径 + 本地鉴权 key 优先级(唯一来源)
+  file-store.js     原子写/独占安装/争用仲裁 + 文件事件唤醒
+  credentials.js    凭据与 token 存取接口 → windows/credentials.js(DPAPI)
+  process-lock.js   进程锁接口 → windows/process-lock.js(PID 探活)
 ```
 
 **两个进程是有意拆分的**：
@@ -93,7 +151,7 @@ start.cmd → dashboard.js(单窗口:前缀交错显示,Ctrl+C/关窗全停)
 | 网络 | 只监听 127.0.0.1，外部不可达 |
 | 防跨域读取 | Host 头白名单（阻断 DNS rebinding） |
 | 防盲写入 | Bearer key 强制鉴权（防恶意网页 CSRF 式盗用配额） |
-| 防资源耗尽 | 连接数上限、请求头/请求体/慢速发送三段超时、Content-Length 预检、限速 60 req/min + 并发 8 |
+| 防资源耗尽 | 连接数上限（32）、inflight 进程保护硬上限（64，不可配置）、请求头/请求体/慢速发送三段超时、Content-Length 预检（业务层无限流，见"设计取舍"） |
 | 防内存耗尽 | 上游响应体双路径上限（JSON 5MB / SSE 64MB） |
 | 静态数据 | 密码与 token DPAPI 加密；DPAPI 调用数据走 stdin，不进命令行/审计日志 |
 | 随机数 | SM2 熵池强制接 Node WebCrypto CSPRNG，不可用即拒绝启动 |
@@ -108,7 +166,8 @@ start.cmd → dashboard.js(单窗口:前缀交错显示,Ctrl+C/关窗全停)
 - **仅限 Windows**：凭据/token 存储用 DPAPI（PowerShell 桥接）；
 - **学校端点硬编码**：WebVPN 前缀、登录表单 URL、漫游 ID 等实测于 2026-09，学校改版即失效——失效时程序会给出明确错误信息，请提 issue；
 - CookieJar / URL 解析为手写简化版（登录链是固定已验证路径，未实现 Domain/Expires 等标准语义）；
-- 单模型（`DeepSeek-V4-Flash`）；限速参数按个人自用设计；
+- 单模型（`DeepSeek-V4-Flash`）；
+- **业务层无限流,仅进程保护**(2026-09-06 调整):多子代理编排是合法负载,原并发 8 会常态化误伤;现保留一个 inflight 硬上限(**固定 64,代码常量,刻意不可配置**),性质是三点:①本地进程保护(防失控客户端拖垮内存/连接),②**不是上游并发能力声明**——上游真实容量未测,该上限与上游行为无关,③超限 429 与上游 429 可区分:本地过载的响应文案为"代理过载保护…(进程保护)"、`type` 为 `rate_limit`、日志 note 为 `overload:inflight=N`;上游 429 经翻译携带上游原文、日志 note 为 `upstream-err`。`server.maxConnections=32` 与各级超时/字节上限继续兜底。有界探测(24 并发突发)未见上游限流,但**长期/持续负载下的上游行为未验证**,重度使用时观察 `overload:` 日志;上游 429 语义照常翻译
 - watch 被强杀（任务管理器）后锁文件残留，下次启动自动探活接管（Windows 信号处理限制，见源码注释）。
 
 ## Roadmap(欢迎贡献)
@@ -117,7 +176,7 @@ start.cmd → dashboard.js(单窗口:前缀交错显示,Ctrl+C/关窗全停)
 2. **跨平台(Windows 优先的取舍)**——secrets 三平台后端(参考 learnX/thu-info-app 的钥匙串实践);
 3. **更多客户端实测**——codex / claude code 等,补 `docs/connect-*.md`。
 
-已完成(见 [CHANGELOG.md](CHANGELOG.md)):`atomic-file.js` 原子文件原语抽取、`paths.js` 路径与鉴权优先级统一、流式/非流式结果分派合并、请求参数归一化、认证链离线测试、注释收敛与代码风格现代化。
+已完成(见 [CHANGELOG.md](CHANGELOG.md)):core/platform/adapters 分层重写、原子文件原语收敛到 `platform/file-store.js`、路径与鉴权优先级统一在 `platform/paths.js`、流式/非流式结果分派合并、请求参数归一化、认证链离线测试、注释收敛与代码风格现代化。
 
 ## 已知兼容性问题:请求体压缩与上游 WAF 误报
 
@@ -135,6 +194,7 @@ start.cmd → dashboard.js(单窗口:前缀交错显示,Ctrl+C/关窗全停)
 - **`usage` 仅在请求携带 `stream_options.include_usage` 时返回**(含 `reasoning_tokens` 单独计数)。代理默认注入,客户端拿到的即真实用量。
 - **模型名精确匹配 `DeepSeek-V4-Flash`**,缺失或拼错 → "模型不存在"。代理会把任意模型名重写为它。
 - **流中会夹带空数据帧**(`data:` 空行,网关心跳;2026-09-05 实测,曾致坏帧误判)。代理容忍空帧,非空坏帧仍按协议错误终止。
+- **突发速率无本地限制**(2026-09-06 有界探测:64 个微型请求、4→24 并发递增、约 25 秒全部 200,上游未触发任何限流;**该探测只覆盖短时突发,持续负载、长流、大响应体下的上游行为未测**,不构成"上游无限制"的证据)。
 - **思考控制**:官方 API 方言(`thinking`/`reasoning_effort`)无效;仅 vLLM 方言 `chat_template_kwargs: {"thinking": false}` 能关闭推理(上游默认全开)。代理会把前两种方言的"关闭"意图映射到后者。
 
 ## 合规声明
@@ -150,13 +210,22 @@ start.cmd → dashboard.js(单窗口:前缀交错显示,Ctrl+C/关窗全停)
 npm test
 ```
 
-全程离线（不需要账号、不触网）。另有 `npm run smoke`——**真实流量冒烟**（需代理在线与有效 token，消耗少量配额）：离线套件只能覆盖*已知*的上游帧型，空心跳帧这类行为只有真实流量能暴露（2026-09-05 曾因此事故）。**凡是改动 SSE 解析/错误处理/超时等协议行为，改完先跑冒烟再算完成**。
+```bat
+npm test
+```
 
-三个文件、107 项断言,全程离线:
+- **全程离线**：不需要账号、不访问真实校方服务、不消耗配额，任何网络环境可跑；失败以非零退出码结束；
+- **`npm run smoke` 不属于离线测试**——它是**真实流量冒烟**（`smoke-real.js`），需要代理在线、真实校方服务和有效 token，并消耗少量配额。离线套件只能覆盖*已知*的上游帧型，空心跳帧这类行为只有真实流量能暴露（2026-09-05 曾因此事故）。**凡是改动 SSE 解析/错误处理/超时等协议行为，改完先跑冒烟再算完成**。
 
-- `test-creds.js`——DPAPI 加解密往返(非 Windows 自动跳过);
+共 177 项断言，分三层(全部离线;另有 `test-creds.js` 的 3 项 DPAPI 自检不计入分项):
+
 - `test-auth.js`(38 项)——认证链纯逻辑:响应体 charset 解码与嗅探回退、重定向白名单(含 userinfo 伪装绕过尝试)、CookieJar 路径匹配与合并 Set-Cookie 切分、JWT 过期兜底、WebVPN URL 改写;
-- `test-proxy.js`(69 项)——假上游 + 子进程代理端到端:鉴权、Host 白名单、SSE 透传/聚合、错误翻译、SSE 内嵌错误与 HTML 错误页翻译、流截断不伪装成功、坏帧不静默跳过、空数据帧容忍、大块合法行不误触上限、`[DONE]` 后挂起不泄漏连接、周期心跳与慢速 JSON 的总时限、超限、断连中止、并发上限、早退日志留痕、usage 注入、参数归一化、干净目录 bootstrap、坏锁/空锁恢复、key 命令与环境变量一致性。
+- `node --test` 单元测试(70 项)——`test-config.js` / `test-sse.js` / `test-payload.js` / `test-aggregator.js` / `test-errors.js` / `test-upstream.js` / `test-scheduler.js`(10 项,调度状态机)/ `test-inflight.js`(8 项,进程保护硬上限与异常路径释放)/ `test-wakeup.js`,覆盖 core 与 platform 各模块接口契约(本地假上游,不起真实连接;调度器与 inflight 守卫用注入依赖离线驱动);
+- `test-proxy.js`(69 项)——假上游 + 子进程代理端到端:鉴权、Host 白名单、SSE 透传/聚合、错误翻译、SSE 内嵌错误与 HTML 错误页翻译、流截断不伪装成功、坏帧不静默跳过、空数据帧容忍、大块合法行不误触上限、`[DONE]` 后挂起不泄漏连接、周期心跳与慢速 JSON 的总时限、超限、断连中止、并发透传(16 并发全部 200)、早退日志留痕、usage 注入、参数归一化、干净目录 bootstrap、坏锁/空锁恢复、key 命令与环境变量一致性。
+
+## 贡献
+
+参与开发(环境要求、测试写法、PR 流程)见 [CONTRIBUTING.md](CONTRIBUTING.md);行为规范见 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。发布前本地自检(文件齐全、敏感文件未入库、Node 版本匹配)可跑 `npm run check:release`。
 
 ## 致谢
 

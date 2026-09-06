@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     strategy:
@@ -18,11 +21,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+          cache: npm
       # 语法门:覆盖测试不会加载的文件(dashboard.js / smoke-real.js)。
       # 用 node --check 而非 eslint,以保持"零 npm 依赖,clone 即用"
       - name: Syntax check
-        run: node -e "for (const f of require('fs').readdirSync('.').filter(f => f.endsWith('.js'))) require('child_process').execFileSync(process.execPath, ['--check', f], { stdio: 'inherit' })"
+        run: |
+          node -e "const fs=require('fs'),path=require('path');const files=[];const walk=d=>{for(const e of fs.readdirSync(d,{withFileTypes:true})){if(e.isDirectory()){if(e.name!=='node_modules')walk(path.join(d,e.name))}else if(e.name.endsWith('.js'))files.push(path.join(d,e.name))}};walk('.');for(const f of files)require('child_process').execFileSync(process.execPath,['--check',f],{stdio:'inherit'})"
       # 与 README 同一入口:test-creds 自识别平台(非 Windows 跳过 DPAPI 部分),
-      # test-proxy 全平台运行(全离线,同时验证零依赖宣称的真实性)
+      # test-proxy 全平台运行(全离线,同时验证零依赖宣称的真实性)。
+      # smoke-real.js 有意不进 CI:它访问真实校方服务并消耗配额
       - name: Run tests
         run: npm test

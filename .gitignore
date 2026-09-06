@@ -8,6 +8,10 @@ api-key
 token.json
 creds.json
 watch.lock
+auth.lock
+
+# 状态目录兜底(路径错误的极端情况下整目录拒绝入库)
+.dsh-madmodel/
 
 # 系统
 .DS_Store
