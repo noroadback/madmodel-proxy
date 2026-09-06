@@ -1,0 +1,10 @@
+# 换行统一:仓库内一律存 LF,签出时由各平台 git 决定(避免 Windows/Unix
+# 混提交产生纯空白 diff)
+* text=auto eol=lf
+
+# sm2.js 是 vendored 的第三方产物,其完整性以字节级 sha256 声明(见文件头部
+# 与 README 致谢一节)。禁止任何换行转换,保证任何平台签出后哈希都能核对上
+sm2.js -text
+
+# Windows 批处理需要 CRLF:部分旧版 cmd.exe 对 LF 结尾的 .cmd 解析异常
+*.cmd text eol=crlf
