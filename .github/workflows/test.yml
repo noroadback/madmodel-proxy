@@ -17,11 +17,12 @@ jobs:
         node: [18, 20, 22, 24]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
-          cache: npm
+          # 不设 cache:本项目零 npm 依赖、无 lockfile,cache 反而因找不到
+          # package-lock.json 直接失败(首推 CI 事故,2026-09-06)
       # 语法门:覆盖测试不会加载的文件(dashboard.js / smoke-real.js)。
       # 用 node --check 而非 eslint,以保持"零 npm 依赖,clone 即用"
       - name: Syntax check
