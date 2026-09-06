@@ -2,6 +2,27 @@
 
 本文件记录面向使用者的行为变化。日期为实测/落地日期。
 
+## 1.2.1
+
+### 并发策略:移除业务层限流,保留进程保护硬上限(2026-09-06)
+
+- 删除 `core/limits.js` 与 `PROXY_MAX_CONCURRENT` / `PROXY_RATE_LIMIT` 配置。理由:多子代理编排(一个 orchestrator 派十几个 sub-agent 同时调模型)是合法负载,固定并发 8 会常态化误伤并诱发客户端重试。
+- 保留一个**不可配置**的 inflight 硬上限(64)作为进程保护,非常规业务限流:防失控客户端紧循环拖垮内存(非流式聚合单流最多缓冲 64MB)与连接。`server.maxConnections=32` 只限 TCP 连接数,keep-alive 复用可绕过,故此层仍必要。超出上限回 429(文案明确"过载保护/进程保护"),日志记 `overload:inflight=N`。
+- 资源兜底不变:请求体/响应体限额、慢速发送三段超时、总时限,全部在 HTTP 适配层保留;上游自身的 429 翻译照常工作。
+- 本地 429 从此只有一种来源:进程过载保护(区别于上游 429 的翻译文案);不再产生 `limited:*` 日志。
+- inflight 硬上限(64,config.js 代码常量,冻结对象,无环境变量解析路径)有 8 项独立单测:上限拒绝、早退不占槽、断开释放、顺序无泄漏,以及四种异常形态(上游请求 reject、headers/idle/total 三类超时、onChunk 抛错、响应写入抛错)后计数必须归零的泄漏探针。
+- 测试计数口径(与 README 一致):`test-auth` 38 + `node --test` 单元 70(含 scheduler 10、inflight 8)+ `test-proxy` 端到端 69 = **177 项**;`test-creds` 的 3 项 DPAPI 自检不计入。
+
+## 1.2.0
+
+### 内部结构:core/platform/adapters 分层重写(行为无变化,2026-09-06)
+
+- 模块按依赖方向重组:`core/`(业务与协议,不读环境变量、不碰文件系统、不依赖 Windows API、不写 HTTP 响应)、`platform/`(DPAPI 凭据、路径、原子文件、进程锁、目录监听,Windows 实现收在 `platform/windows/`)、`adapters/`(HTTP 与终端 I/O)。原根目录的 server/upstream/sse/aggregator/limits/payload/errors/response/request/auth-middleware/storage/stream-utils/cli/file-wakeup/atomic-file/creds/secure-store/paths 共 18 个文件全部迁移或合并删除,入口仍是 `node proxy.js` 与 `node refresh-token.js ...`。
+- 上游客户端统一为 7 种结果类型(`stream`/`completion`/`upstream-error`/`timeout(phase: headers|idle|total)`/`aborted`/`protocol-error`/`network-error`),单 AbortController 管理整个生命周期,header/idle/total 三类超时走同一条收尾清理路径;SSE 解析器接管 UTF-8 解码(多字节字符跨 chunk 切开也能正确拼帧)。
+- watch 续期守护抽出 `core/scheduler.js` 状态机(WAITING/REFRESHING/BACKOFF/STOPPED),认证协议细节留在 auth-service;调度器有独立单测(退避档位、闸门不被文件事件绕过、TWO_FACTOR_REQUIRED 立即停、BAD_CREDENTIALS 连续三次停、AUTH_BUSY 短退避)。
+- 限流修正:并发被拒的请求不再计入速率窗口(该修正随 1.2.1 的限流移除一并成为历史)。
+- 离线测试从 158 项(重写前基线)扩到 177 项:1.2.0 新增 scheduler 10 项、upstream-client 接口 1 项、limits/payload/errors/sse 契约 4 项;1.2.1 移除 limits 测试 4 项、新增 inflight 8 项(上限守卫 4 项 + 异常释放 4 项)。`npm run smoke` 收敛为最小请求集(/v1/models + 一次短流式 + 一次非流式)。
+
 ## 1.1.0
 
 ### 新增

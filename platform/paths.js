@@ -1,7 +1,7 @@
-// paths.js
+// platform/paths.js
 // 状态目录、各状态文件路径、以及本地鉴权 key 的解析优先级——全项目唯一来源。
-// 此前这些在 proxy / refresh-token / creds / secure-store / smoke-real 各算一遍,
-// 优先级口径漂移过(test-proxy.js 第 15 节的两个用例就是为此加的)。
+// platform 层允许读取 process.env(core 层禁止);此前的分散计算曾导致优先级
+// 口径漂移(test-proxy.js 第 15 节的两个用例就是为此加的)。
 
 'use strict';
 
@@ -27,9 +27,12 @@ function display(file) {
 }
 
 // 本地鉴权 key 的解析优先级,代理与各 CLI 共用一份:
-// PROXY_NO_AUTH=1 > PROXY_API_KEY > key 文件。source 供诊断命令区分口径。
+// PROXY_NO_AUTH=1 > PROXY_API_KEY > key 文件。source 供诊断命令区分口径;
+// envOverridden 标记"NO_AUTH 生效但 PROXY_API_KEY 也设置了"的误导性配置。
 function resolveApiKey() {
-  if (process.env.PROXY_NO_AUTH === '1') return { key: '', source: 'disabled' };
+  if (process.env.PROXY_NO_AUTH === '1') {
+    return { key: '', source: 'disabled', envOverridden: !!process.env.PROXY_API_KEY };
+  }
   if (process.env.PROXY_API_KEY) return { key: process.env.PROXY_API_KEY, source: 'env' };
   try {
     const key = fs.readFileSync(KEY_FILE, 'utf8').trim();

@@ -1,9 +1,11 @@
-// atomic-file.js
-// 三个文件写入原语。状态目录里的每个文件都属于以下三类之一:
+// platform/file-store.js
+// 文件系统原语:原子写入 / 独占安装 / 单写者文件争用仲裁 / 目录监听唤醒。
+// 全项目的 fs 写入路径都收在这里,core 层不直接接触文件系统。
+//
+// 三个写入原语。状态目录里的每个文件都属于以下三类之一:
 //   atomicWrite       单写者、可覆盖(token.json / creds.json,写入方已被锁保护)
 //   installExclusive  只允许创建、目标已存在即失败(争用仲裁的基础动作)
 //   claimFile         争用单写者文件的所有权(api-key 引导 / PID 锁)
-//
 // 共同的不变量:内容永不写进已存在的 inode——一律先写同目录临时文件再
 // rename/link 就位。读方于是只有两种可见状态:文件不存在,或内容完整。
 
@@ -11,12 +13,19 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+
+// 临时文件必须每次唯一:固定 ${pid}.tmp 在同一进程内并发写同一目标时
+// 互相覆盖(rename 抢跑会装错内容),随机后缀消除该共享名
+function stagingFile(file, tag) {
+  return `${file}.${tag}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+}
 
 // mode 0o600 在创建时就收紧权限(POSIX 下 umask 不影响显式 mode 的属主位),
 // 避免"先 0644 后 chmod"之间出现世界可读的窗口
 function atomicWrite(file, content, mode = 0o600) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
+  const tmp = stagingFile(file, 'w');
   fs.writeFileSync(tmp, content, { encoding: 'utf8', mode });
   fs.renameSync(tmp, file);
 }
@@ -25,7 +34,7 @@ function atomicWrite(file, content, mode = 0o600) {
 // 不能用 openSync(file, 'wx'):那样先出现空文件再写入,并发方在窗口内会读到
 // 空内容,创建方中途崩溃还会留下永久空文件。
 function installExclusive(file, content) {
-  const tmp = `${file}.${process.pid}.tmp`;
+  const tmp = stagingFile(file, 'x');
   try {
     fs.writeFileSync(tmp, content, 'utf8');
     fs.linkSync(tmp, file);
@@ -65,7 +74,7 @@ function claimFile(file, content, isUsable, attempts = 8) {
     }
     if (isUsable(current)) return { installed: false, content: current };
 
-    const quarantined = `${file}.stale.${process.pid}`;
+    const quarantined = stagingFile(file, 'stale');
     try { fs.renameSync(file, quarantined); }
     catch (e) {
       if (e.code !== 'ENOENT') throw e;
@@ -81,4 +90,59 @@ function claimFile(file, content, isUsable, attempts = 8) {
   }
 }
 
-module.exports = { atomicWrite, installExclusive, claimFile };
+// ===== 续期等待:到期调度 + 文件事件唤醒 =====
+// Watch directories so atomic file replacement does not detach the listener.
+function createFileWakeup(files) {
+  const directories = new Map();
+  const watchers = [];
+  const normalize = name => process.platform === 'win32' ? name.toLowerCase() : name;
+  let changed = false;
+  let pending = null;
+  let closed = false;
+
+  for (const file of files) {
+    const directory = path.dirname(file);
+    if (!directories.has(directory)) directories.set(directory, new Set());
+    directories.get(directory).add(normalize(path.basename(file)));
+  }
+
+  function wake() {
+    changed = true;
+    if (pending) pending('changed');
+  }
+
+  for (const [directory, names] of directories) {
+    try {
+      const watcher = fs.watch(directory, { persistent: false }, (_, name) => {
+        if (name === null || names.has(normalize(String(name)))) wake();
+      });
+      // The timer remains active if the directory disappears or watching fails.
+      watcher.on('error', () => watcher.close());
+      watchers.push(watcher);
+    } catch (error) { /* Timer fallback, including missing credentials directories. */ }
+  }
+
+  return {
+    reset() { changed = false; },
+    wait(ms) {
+      if (closed) return Promise.resolve('closed');
+      if (changed) return Promise.resolve('changed');
+      return new Promise(resolve => {
+        const timer = setTimeout(() => finish('timeout'), ms);
+        const finish = reason => {
+          clearTimeout(timer);
+          pending = null;
+          resolve(reason);
+        };
+        pending = finish;
+      });
+    },
+    close() {
+      closed = true;
+      for (const watcher of watchers) watcher.close();
+      if (pending) pending('closed');
+    },
+  };
+}
+
+module.exports = { atomicWrite, installExclusive, claimFile, createFileWakeup };
