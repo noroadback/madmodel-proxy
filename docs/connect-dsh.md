@@ -1,6 +1,6 @@
 # 接入 dsh（首次配置指南）
 
-从零到 dsh 能用上 madmodel，大约 5 分钟。流程已在 Windows 11 + Node.js 24 + dsh 上实测走通；其他 OpenAI 兼容客户端的配置方式与 dsh 一致，未逐一验证，欢迎在 issue 里附上你的结果。
+从零到 dsh 能用上 madmodel，大约 5 分钟，已在 Windows 11 + Node.js 24 + dsh 上实测。其他 OpenAI 兼容客户端的配置方式相同。
 
 前置三样。Windows 10/11（凭据存储用 DPAPI，暂不支持 macOS/Linux）；Node.js 18.14 以上（终端跑 `node -v` 确认，版本太低程序会直接报错）；一个清华统一认证账号。本工具零第三方依赖，clone 之后不用 `npm install`。
 
@@ -20,7 +20,7 @@ node refresh-token.js login
 
 ## 第 2 步：启动
 
-双击 **`start.cmd`**（在 PowerShell 里运行要写 `.\start.cmd`，CMD 里直接 `start.cmd` 即可）。首次启动会问你要不要在桌面创建快捷方式，按 Y 之后开机从桌面双击启动，省去找文件夹。然后它以单窗口拉起续期守护和代理，日志用 `[watch]` 和 `[代理]` 前缀区分，Ctrl+C 或关窗全部停止；重复双击无害，已有实例在跑就直接退出。
+双击 **`start.cmd`**。首次启动会问要不要在桌面创建快捷方式，之后从桌面启动即可。之后以单窗口拉起续期守护和本地端点，日志用 `[watch]` 和 `[代理]` 前缀区分，Ctrl+C 或关窗全部停止；重复运行无害，已在运行时显示状态。
 
 看到这样的输出就是成功了。
 
@@ -34,7 +34,7 @@ node refresh-token.js login
 
 ## 第 3 步：配置 dsh
 
-在 dsh 的供应商（Provider）配置里新建或编辑一条 OpenAI 兼容配置。界面若让你选协议类型，选 **Chat / Chat Completions**（不要选 Anthropic Messages、Responses、Gemini Native，那是别家的协议）。
+在 dsh 的供应商（Provider）配置里新建或编辑一条 OpenAI 兼容配置。界面若让你选协议类型，选 Chat Completions。
 
 | 配置项 | 值 |
 |---|---|

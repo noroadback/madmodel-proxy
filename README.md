@@ -1,8 +1,8 @@
 # madmodel-proxy
 
-把清华 madmodel 变成本机一个配好就不用管的 OpenAI 端点。login 一次、双击 start.cmd，token 的获取、续期、轮转全归它管，你的客户端只认 `http://127.0.0.1:8080/v1`。
+madmodel 的本地 OpenAI 端点。自动完成统一认证登录与 token 续期，上游的协议问题在本层处理，客户端连 `http://127.0.0.1:8080/v1`。
 
-## 三步开始
+## 使用
 
 前置是 Windows 10/11、Node.js ≥ 18.14 和一个清华统一认证账号。
 
@@ -11,24 +11,20 @@ cd %USERPROFILE%
 git clone https://github.com/noroadback/madmodel-proxy.git
 cd madmodel-proxy
 
-rem 1. 首次配置:输入学号+密码(首次含二次认证,只需一次)
+rem 首次配置:输入学号+密码(首次含二次认证,只需一次)
 node refresh-token.js login
 ```
 
-然后双击 **start.cmd** 启动（资源管理器里双击即可；在 PowerShell 里运行要写 `.\start.cmd`，CMD 里 `start.cmd` 即可）。首次启动会问你要不要在桌面建快捷方式，按 Y 之后开机从桌面双击启动，窗口最小化挂着就行。
+双击 **start.cmd** 启动，窗口保持开启。首次启动会问是否创建桌面快捷方式。服务已在运行时再次运行 start.cmd 会显示状态，不会重复启动。
 
-想看运行状态时，再双击一次桌面图标（或 start.cmd）即可——服务在跑就会显示一屏体检（代理/token/续期守护/凭据），不会重复启动；命令行形态是 `node refresh-token.js status`。
-
-然后在你的智能体里填这几个值。
+在客户端（智能体、OpenAI SDK）里填以下值。
 
 | 配置项 | 值 |
 |---|---|
-| 协议类型 | **Chat / Chat Completions**（别选 Anthropic/Responses/Gemini Native，那些是别家协议） |
+| 协议 | Chat Completions |
 | Base URL | `http://127.0.0.1:8080/v1` |
-| API Key | 随便填（本地无鉴权，界面要求非空就填 `none`） |
+| API Key | 任意值（本地无鉴权） |
 | 模型 | `DeepSeek-V4-Flash` |
-
-dsh / codex / claude code 找配置文件里的 `base_url` + `model`；Cherry Studio / ChatBox / CCS 这类带"添加供应商"的客户端，选"OpenAI"或"自定义/OpenAI 兼容"类型填上面四个值（模型列表可点"获取"拉取）；代码调用是 `new OpenAI({ baseURL: 'http://127.0.0.1:8080/v1', apiKey: 'none' })`。模型列表拉不出来就是 Base URL 的 `/v1` 多带或少带了。
 
 详细步骤与故障排查见 [docs/connect-dsh.md](docs/connect-dsh.md)。
 
