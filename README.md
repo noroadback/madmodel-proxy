@@ -26,7 +26,7 @@ madmodel（`madmodel.cs.tsinghua.edu.cn`，清华大学高性能计算中心部�
 - **单窗口运行**。start.cmd 经 dashboard.js 同窗拉起守护与代理，`[代理]`/`[watch]` 前缀区分日志，Ctrl+C 或关窗全停。
 - **真实 usage**。对上游注入 `include_usage`（上游默认不回 usage），非流式聚合与流式透传都带真实 token 数，`reasoning_tokens` 单独可见。
 - **参数归一化**。模型名重写、剥离上游拒绝的参数（`logprobs` 等）、把三种"关闭推理"方言统一映射到上游唯一生效的写法，客户端不必为这个端点特调。
-- **离线测试套件**。假上游加子进程，177 项端到端与单元测试，不需要账号、不触网。
+- **离线测试套件**。假上游加子进程，178 项端到端与单元测试，不需要账号、不触网。
 
 ## 测试状态
 
@@ -63,6 +63,24 @@ node refresh-token.js key
 | Base URL | `http://127.0.0.1:8080/v1` |
 | API Key | 上面 `key` 命令的输出 |
 | 模型 | `DeepSeek-V4-Flash` |
+
+### 接入任意 OpenAI 兼容智能体
+
+绝大多数智能体和客户端都有"自定义 OpenAI 供应商"或"API Provider"的配置入口（通常在设置或模型供应商页）。无论界面怎么叫，本质都是填三个值。
+
+| 本项目要填的 | 界面上的常见叫法 |
+|---|---|
+| `http://127.0.0.1:8080/v1` | Base URL / API 地址 / Endpoint / 接口地址（有的要求带 `/v1`，有的界面自带后缀只填 `http://127.0.0.1:8080`，按其示例格式） |
+| `key` 命令的输出 | API Key / 密钥 / Token（粘贴整串） |
+| `DeepSeek-V4-Flash` | Model / 模型名 / 型号 |
+
+几个常见界面形态的对应关系。
+
+- **dsh / codex / claude code 类命令行工具**。配置文件里找 `base_url`（或 `OPENAI_BASE_URL` 环境变量）、`api_key`、`model` 三项填入即可。
+- **带"添加供应商"按钮的桌面应用**（Cherry Studio、ChatBox、LobeChat 等）。选"OpenAI"或"自定义/OpenAI 兼容"类型，把上面三个值填进对应输入框，模型列表可以点"获取"拉取（代理的 `/v1/models` 会返回 DeepSeek-V4-Flash）。
+- **LangChain / OpenAI SDK 代码调用**。`new OpenAI({ baseURL: 'http://127.0.0.1:8080/v1', apiKey: '你的key' })`，模型名传 `DeepSeek-V4-Flash`。
+
+两个填错时的症状，方便对号入座。界面拉取模型列表失败或列表为空，多半是 Base URL 少了或多带了 `/v1`；请求全部 401，是 key 没粘贴全或界面里有默认的旧 key。
 
 ## 环境变量
 
@@ -219,10 +237,10 @@ npm test
 - **全程离线**。不需要账号、不访问真实校方服务、不消耗配额，任何网络环境可跑，失败以非零退出码结束。
 - **`npm run smoke` 不属于离线测试**。它是真实流量冒烟（`smoke-real.js`），需要代理在线、真实校方服务和有效 token，并消耗少量配额。离线套件只能覆盖已知的上游帧型，空心跳帧这类行为只有真实流量能暴露（2026-09-05 曾因此事故）。凡是改动 SSE 解析、错误处理、超时等协议行为，改完先跑冒烟再算完成。
 
-共 177 项断言，分三层（全部离线；另有 `test-creds.js` 的 3 项 DPAPI 自检不计入分项）。
+共 178 项断言，分三层（全部离线；另有 `test-creds.js` 的 3 项 DPAPI 自检不计入分项）。
 
 - `test-auth.js`（38 项）。认证链纯逻辑，包括响应体 charset 解码与嗅探回退、重定向白名单（含 userinfo 伪装绕过尝试）、CookieJar 路径匹配与合并 Set-Cookie 切分、JWT 过期兜底、WebVPN URL 改写。
-- `node --test` 单元测试（70 项）。`test-config.js`、`test-sse.js`、`test-payload.js`、`test-aggregator.js`、`test-errors.js`、`test-upstream.js`、`test-scheduler.js`（10 项，调度状态机）、`test-inflight.js`（8 项，进程保护硬上限与异常路径释放）、`test-wakeup.js`，覆盖 core 与 platform 各模块的接口契约。本地假上游，不起真实连接；调度器与 inflight 守卫用注入依赖离线驱动。
+- `node --test` 单元测试（71 项）。`test-config.js`、`test-sse.js`、`test-payload.js`、`test-aggregator.js`、`test-errors.js`、`test-upstream.js`、`test-scheduler.js`（10 项，调度状态机）、`test-inflight.js`（8 项，进程保护硬上限与异常路径释放）、`test-wakeup.js`、`test-login-prompt.js`（管道凭据回归），覆盖 core 与 platform 各模块的接口契约。本地假上游，不起真实连接；调度器与 inflight 守卫用注入依赖离线驱动。
 - `test-proxy.js`（69 项）。假上游加子进程的代理端到端，覆盖鉴权、Host 白名单、SSE 透传与聚合、错误翻译、SSE 内嵌错误与 HTML 错误页翻译、流截断不伪装成功、坏帧不静默跳过、空数据帧容忍、大块合法行不误触上限、`[DONE]` 后挂起不泄漏连接、周期心跳与慢速 JSON 的总时限、超限、断连中止、并发透传（16 并发全部 200）、早退日志留痕、usage 注入、参数归一化、干净目录 bootstrap、坏锁与空锁恢复、key 命令与环境变量一致性。
 
 ## 贡献
