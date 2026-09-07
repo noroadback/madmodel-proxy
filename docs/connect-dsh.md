@@ -20,7 +20,7 @@ node refresh-token.js login
 
 ## 第 2 步：启动
 
-双击 **`start.cmd`**。它先探一下 8080 端口，已有实例在跑就直接退出，不会重复启动；然后以单窗口拉起续期守护和代理，日志用 `[watch]` 和 `[代理]` 前缀区分，Ctrl+C 或关窗全部停止。
+双击 **`start.cmd`**（在 PowerShell 里运行要写 `.\start.cmd`，CMD 里直接 `start.cmd` 即可）。首次启动会问你要不要在桌面创建快捷方式，按 Y 之后开机从桌面双击启动，省去找文件夹。然后它以单窗口拉起续期守护和代理，日志用 `[watch]` 和 `[代理]` 前缀区分，Ctrl+C 或关窗全部停止；重复双击无害，已有实例在跑就直接退出。
 
 看到这样的输出就是成功了。
 
@@ -34,7 +34,7 @@ node refresh-token.js login
 
 ## 第 3 步：配置 dsh
 
-在 dsh 的供应商（Provider）配置里新建或编辑一条 OpenAI 兼容配置。
+在 dsh 的供应商（Provider）配置里新建或编辑一条 OpenAI 兼容配置。界面若让你选协议类型，选 **Chat / Chat Completions**（不要选 Anthropic Messages、Responses、Gemini Native，那是别家的协议）。
 
 | 配置项 | 值 |
 |---|---|
@@ -48,10 +48,11 @@ node refresh-token.js login
 
 ## 日常
 
-- start.cmd 的窗口保持开着（最小化即可），关机重启后重新双击
+- 开机后从桌面快捷方式（或 start.cmd）双击启动，窗口最小化挂着即可
 - token 全自动。到期前 30 分钟自动续期，代理热加载新 token，你什么都不用做，可以忘了这回事
 - 重复双击无害。单实例锁自动探活，旧守护死了新守护接管
 - 改了统一认证密码的话，守护连续 3 次登录失败会自动退出并提示，重跑一遍第 1 步（`login`）即可，其他配置不受影响
+- 找不到项目文件夹时，右键桌面快捷方式选"打开文件所在位置"；或者仓库丢了直接重新 clone（状态目录在 `%USERPROFILE%\.dsh-madmodel\`，与仓库分离，重 clone 不丢登录状态）
 
 ## 出问题时
 

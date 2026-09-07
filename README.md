@@ -7,16 +7,18 @@
 前置是 Windows 10/11、Node.js ≥ 18.14 和一个清华统一认证账号。
 
 ```bat
+cd %USERPROFILE%
 git clone https://github.com/noroadback/madmodel-proxy.git
 cd madmodel-proxy
 
 rem 1. 首次配置:输入学号+密码(首次含二次认证,只需一次)
 node refresh-token.js login
+```
 
-rem 2. 启动:双窗口拉起续期守护 + 代理(双击 start.cmd 亦可,之后保持窗口开着)
-start.cmd
+然后双击 **start.cmd** 启动（资源管理器里双击即可；在 PowerShell 里运行要写 `.\start.cmd`，CMD 里 `start.cmd` 即可）。首次启动会问你要不要在桌面建快捷方式，按 Y 之后开机从桌面双击启动，窗口最小化挂着就行。
 
-rem 3. 随时查看状态(双击 status.cmd 亦可)
+```bat
+rem 随时查看状态(双击 status.cmd 亦可)
 node refresh-token.js status
 ```
 
@@ -24,11 +26,12 @@ node refresh-token.js status
 
 | 配置项 | 值 |
 |---|---|
+| 协议类型 | **Chat / Chat Completions**（别选 Anthropic/Responses/Gemini Native，那些是别家协议） |
 | Base URL | `http://127.0.0.1:8080/v1` |
 | API Key | 随便填（本地无鉴权，界面要求非空就填 `none`） |
 | 模型 | `DeepSeek-V4-Flash` |
 
-dsh / codex / claude code 找配置文件里的 `base_url` + `model`；Cherry Studio / ChatBox / LobeChat 选"OpenAI 兼容"供应商填上面三个值（模型列表可点"获取"拉取）；代码调用是 `new OpenAI({ baseURL: 'http://127.0.0.1:8080/v1', apiKey: 'none' })`。模型列表拉不出来就是 Base URL 的 `/v1` 多带或少带了。
+dsh / codex / claude code 找配置文件里的 `base_url` + `model`；Cherry Studio / ChatBox / CCS 这类带"添加供应商"的客户端，选"OpenAI"或"自定义/OpenAI 兼容"类型填上面四个值（模型列表可点"获取"拉取）；代码调用是 `new OpenAI({ baseURL: 'http://127.0.0.1:8080/v1', apiKey: 'none' })`。模型列表拉不出来就是 Base URL 的 `/v1` 多带或少带了。
 
 详细步骤与故障排查见 [docs/connect-dsh.md](docs/connect-dsh.md)。
 
