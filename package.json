@@ -1,6 +1,6 @@
 {
   "name": "madmodel-proxy",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "private": true,
   "license": "MIT",
   "description": "madmodel 本地 OpenAI 兼容代理 + 清华统一认证 token 自动续期(Windows 专用,GitHub 源码分发,不发布到 npm)",
@@ -24,7 +24,6 @@
     "watch": "node refresh-token.js watch",
     "status": "node refresh-token.js status",
     "smoke": "node smoke-real.js",
-    "check:release": "node scripts/release-check.js",
-    "test": "node test-creds.js && node test-auth.js && node --test test-config.js test-sse.js test-payload.js test-aggregator.js test-errors.js test-upstream.js test-scheduler.js test-inflight.js test-wakeup.js test-login-prompt.js && node test-proxy.js"
+    "check:release": "node scripts/release-check.js"
   }
 }

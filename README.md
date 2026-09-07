@@ -47,7 +47,6 @@ madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件�
 - **DPAPI 加密**。密码与 token 静态加密存储，仅当前 Windows 账户可解
 - **单窗口运行**。start.cmd 同窗拉起守护与代理，Ctrl+C 或关窗全停
 - **真实 usage**。代理注入 `include_usage`，客户端拿到真实 token 计数
-- **离线测试**。173 项断言，不需要账号、不触网
 
 ## 边界
 
@@ -83,7 +82,7 @@ madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件�
 - 上游实测行为与设计取舍，见 [CHANGELOG.md](CHANGELOG.md)。
 - 数据流向与安全边界，见 [SECURITY.md](SECURITY.md)。
 - 参与贡献，见 [CONTRIBUTING.md](CONTRIBUTING.md)。
-- 测试用 `npm test`，全程离线；`npm run smoke` 是真实流量冒烟（需 token，消耗少量配额）。
+- 改动协议行为后的验证用 `npm run smoke`，它是真实流量冒烟（需 token，消耗少量配额）。
 
 本工具仅供清华大学师生在遵守学校相关规定的前提下个人使用，不提供配额共享，请勿用于服务他人的用途。
 

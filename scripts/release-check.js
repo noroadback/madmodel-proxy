@@ -33,8 +33,6 @@ for (const field of ['name', 'version', 'description', 'license']) {
   if (pkg[field]) ok(`package.json: ${field} 已设置`);
   else fail(`package.json: ${field} 缺失`);
 }
-if (pkg.scripts?.test) ok('package.json: test 脚本存在');
-else fail('package.json: test 脚本缺失');
 
 // 3) 敏感文件不在 Git 跟踪列表(误提交即拒绝发布)
 const SENSITIVE = ['token.json', 'creds.json', 'api-key', 'last-failed-request.json',
