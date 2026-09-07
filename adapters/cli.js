@@ -18,42 +18,45 @@ async function promptCredentials() {
   const ask = q => new Promise(res => rl.question(q, res));
   const username = (await ask('学号: ')).trim();
   if (!username) { console.error('学号不能为空'); process.exit(1); }
-  rl.close(); // 释放 stdin,避免与 raw 模式密码输入抢占
-  // 隐藏密码输入:raw mode 逐键读取,不回显(退格/回车正常处理),纯 Node 不依赖 PowerShell
-  const password = await new Promise(resolve => {
-    process.stdout.write('统一认证密码(输入不显示): ');
-    if (!process.stdin.isTTY) {
-      // 非 TTY(管道环境):按行读,输入内容不经过终端
-      process.stdin.once('data', d => {
-        process.stdout.write('\n');
-        resolve(String(d).trim());
-      });
-      return;
-    }
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-    process.stdin.setEncoding('utf8');
-    let buf = '';
-    const onData = ch => {
-      if (ch === '\r' || ch === '\n') {
-        process.stdin.setRawMode(false);
-        process.stdin.removeListener('data', onData);
-        process.stdin.pause();
-        process.stdout.write('\n');
-        resolve(buf);
-      } else if (ch === '\u0003') { // Ctrl+C
-        process.stdin.setRawMode(false);
-        console.error('\n已取消');
-        process.exit(130);
-      } else if (ch === '\u007f' || ch === '\b') { // 退格
-        if (buf) { buf = buf.slice(0, -1); process.stdout.write('\b \b'); }
-      } else if (ch >= ' ') {
-        buf += ch;
-        process.stdout.write('*');
-      }
-    };
-    process.stdin.on('data', onData);
-  });
+  // 隐藏密码输入。TTY:raw mode 逐键读取,不回显(退格/回车正常处理),
+  // 纯 Node 不依赖 PowerShell;非 TTY(管道):同样用 readline 按行读——
+  // 陷阱:管道模式 readline 会预读缓冲整个 stdin,rl.close() 还会结束
+  // 输入流,绕开 readline 的裸 stdin 监听既拿不到被缓冲的行、也会挂死,
+  // 所以这里统一走 rl.question,close 放到最后
+  const isTTY = !!process.stdin.isTTY;
+  let password;
+  if (isTTY) {
+    password = await new Promise(resolve => {
+      process.stdout.write('统一认证密码(输入不显示): ');
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+      process.stdin.setEncoding('utf8');
+      let buf = '';
+      const onData = ch => {
+        if (ch === '\r' || ch === '\n') {
+          process.stdin.setRawMode(false);
+          process.stdin.removeListener('data', onData);
+          process.stdin.pause();
+          process.stdout.write('\n');
+          resolve(buf);
+        } else if (ch === '\u0003') { // Ctrl+C
+          process.stdin.setRawMode(false);
+          console.error('\n已取消');
+          process.exit(130);
+        } else if (ch === '\u007f' || ch === '\b') { // 退格
+          if (buf) { buf = buf.slice(0, -1); process.stdout.write('\b \b'); }
+        } else if (ch >= ' ') {
+          buf += ch;
+          process.stdout.write('*');
+        }
+      };
+      process.stdin.on('data', onData);
+    });
+  } else {
+    // 管道环境:输入内容不经过终端,无回显问题
+    password = (await ask('统一认证密码(输入不显示): ')).trim();
+  }
+  rl.close(); // 凭据都拿到后再释放 stdin
   if (!password) { console.error('密码不能为空'); process.exit(1); }
   return { username, password };
 }
