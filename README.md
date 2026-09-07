@@ -17,10 +17,7 @@ node refresh-token.js login
 
 然后双击 **start.cmd** 启动（资源管理器里双击即可；在 PowerShell 里运行要写 `.\start.cmd`，CMD 里 `start.cmd` 即可）。首次启动会问你要不要在桌面建快捷方式，按 Y 之后开机从桌面双击启动，窗口最小化挂着就行。
 
-```bat
-rem 随时查看状态(双击 status.cmd 亦可)
-node refresh-token.js status
-```
+想看运行状态时，再双击一次桌面图标（或 start.cmd）即可——服务在跑就会显示一屏体检（代理/token/续期守护/凭据），不会重复启动；命令行形态是 `node refresh-token.js status`。
 
 然后在你的智能体里填这三个值。
 

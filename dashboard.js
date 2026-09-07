@@ -80,7 +80,7 @@ function launch(tag, script, args) {
 
 console.log('madmodel 单窗口模式:watch 续期守护 + 反代同窗运行');
 console.log('停止:本窗口 Ctrl+C 或直接关窗(两者一起停;watch 锁残留由下次启动自动探活接管)');
-console.log('token 用量随请求日志显示(tok 输入+输出(r推理),含会话累计);状态速查另开 status.cmd');
+console.log('token 用量随请求日志显示(tok 输入+输出(r推理),含会话累计);状态速查再双击一次 start.cmd(在跑即显示体检)');
 console.log('──────────────────────────────────────────────');
 launch('watch', 'refresh-token.js', ['watch']);
 launch('代理', 'proxy.js', []);
