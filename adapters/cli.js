@@ -19,13 +19,14 @@ async function promptCredentials() {
   const username = (await ask('学号: ')).trim();
   if (!username) { console.error('学号不能为空'); process.exit(1); }
   // 隐藏密码输入。TTY:raw mode 逐键读取,不回显(退格/回车正常处理),
-  // 纯 Node 不依赖 PowerShell;非 TTY(管道):同样用 readline 按行读——
-  // 陷阱:管道模式 readline 会预读缓冲整个 stdin,rl.close() 还会结束
-  // 输入流,绕开 readline 的裸 stdin 监听既拿不到被缓冲的行、也会挂死,
-  // 所以这里统一走 rl.question,close 放到最后
+  // 纯 Node 不依赖 PowerShell;非 TTY(管道):用 readline 按行读
   const isTTY = !!process.stdin.isTTY;
   let password;
   if (isTTY) {
+    // TTY:进密码输入前必须先关 readline——否则它仍以 echo 模式监听 stdin,
+    // 把密码字符原样回显到终端(与 * 回显叠加成乱码,退格时两边互相打架)。
+    // TTY 下 rl.close 不会结束输入流(与管道模式的关键差异),安全
+    rl.close();
     password = await new Promise(resolve => {
       process.stdout.write('统一认证密码(输入不显示): ');
       process.stdin.setRawMode(true);
@@ -53,8 +54,11 @@ async function promptCredentials() {
       process.stdin.on('data', onData);
     });
   } else {
-    // 管道环境:输入内容不经过终端,无回显问题
+    // 管道环境:输入内容不经过终端,无回显问题。readline 预读缓冲了整个
+    // stdin,必须在 readline 上按行读(绕开它的裸监听拿不到被缓冲的数据,
+    // 且 rl.close 在管道模式会直接结束输入流——曾导致管道 login 挂死)
     password = (await ask('统一认证密码(输入不显示): ')).trim();
+    rl.close();
   }
   rl.close(); // 凭据都拿到后再释放 stdin
   if (!password) { console.error('密码不能为空'); process.exit(1); }
