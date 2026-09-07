@@ -11,7 +11,7 @@
 //   5. 预检:body > 950KB 提前 413(nginx 1MB 硬限,留余量)
 //   6. 并发不受业务层限制(多子代理编排是合法负载;实测上游 ≥24 并发流无压力),
 //      资源兜底靠 server.maxConnections 与各级超时/字节上限(见 README 安全设计)
-//   7. 本机安全边界:Host 白名单 + Bearer 鉴权 + 各级限额与超时(见 README 安全设计)
+//   7. 本机安全边界:Host 白名单 + 各级限额与超时(本地无鉴权,见 README 设计取舍)
 //
 // 架构分层:core/(业务与协议,无平台依赖) + adapters/(HTTP 适配) +
 // platform/(DPAPI/路径/原子文件/进程锁)。环境变量清单见 README 配置表。
@@ -51,14 +51,7 @@ httpServer.server.listen(config.port, config.host, () => {
   const auth = httpServer.auth;
   console.log(`madmodel 反代已启动: http://${config.host}:${config.port}/v1`);
   console.log(`模型: ${config.models.join(', ')}`);
-  if (auth.apiKey) {
-    console.log(`本地鉴权: 已启用(${auth.keyEnv ? '环境变量 PROXY_API_KEY 指定' : auth.keyGenerated ? '本次生成随机 key' : '复用已有'}` +
-      (auth.keyPersisted ? '' : ',⚠ 落盘失败,使用进程内临时 key') +
-      `,客户端 Bearer key 见: ${paths.display(paths.KEY_FILE)})`);
-  } else {
-    console.log('⚠ 本地鉴权已关闭(PROXY_NO_AUTH=1):恶意网页可盲调本代理消耗配额,仅限测试' +
-      (auth.keyEnvOverridden ? ';注意:PROXY_API_KEY 已设置但被 NO_AUTH 覆盖,不参与鉴权' : ''));
-  }
+  console.log('本地无鉴权(客户端 API key 随便填);安全边界为本机回环 + Host 白名单');
   console.log(`token 文件: ${paths.display(paths.TOKEN_FILE)}(热加载,续期免重启)`);
   const t = auth.getToken();
   if (t) {

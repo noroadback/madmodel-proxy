@@ -1,18 +1,17 @@
 // adapters/http-server.js
-// HTTP 适配层:路由(模型端点/根路径/chat)、Host 白名单、本地 Bearer 鉴权、
-// 请求体读取(Content-Length 预检/限额/超时)、响应写出(JSON/SSE/错误)、
-// token 文件的 mtime 热加载缓存。业务判定在 core/proxy-service.js。
+// HTTP 适配层:路由(模型端点/根路径/chat)、Host 白名单、请求体读取
+// (Content-Length 预检/限额/超时)、响应写出(JSON/SSE/错误)、token 文件的
+// mtime 热加载缓存。业务判定在 core/proxy-service.js。
 // 本模块是 core 与 platform 之间的装配点:core 不接触 req/res/fs。
+// 本地无鉴权:只监听 127.0.0.1 + Host 白名单即为本机边界(设计取舍见 README)。
 
 'use strict';
 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
 const { jwtExpiresAt } = require('../madmodel-auth');
 const credentials = require('../platform/credentials');
-const { claimFile } = require('../platform/file-store');
 const paths = require('../platform/paths');
 
 // ===== 响应格式(OpenAI 兼容) =====
@@ -30,33 +29,6 @@ function openAiError(res, status, message, type, extraHeaders) {
   sendJson(res, status, {
     error: { message, type: type || 'proxy_error', code: status },
   }, extraHeaders);
-}
-
-// ===== 本地鉴权 key =====
-// 默认强制(启动时生成随机 key 并落盘,首启打印),防恶意网页 blind POST 盗用
-// 配额——Host 白名单挡不住无响应读取需求的 CSRF 式滥用。
-// PROXY_API_KEY 显式指定;PROXY_NO_AUTH=1 仅测试场景关闭(优先级见 paths.js)。
-// key 文件为明文而非 DPAPI:它必须人工抄进客户端配置,离开本机即无用,且受
-// 用户目录 ACL 保护。对比 creds/token 加密防的是文件离机外带。
-function loadApiKey() {
-  // 快路径:已有 key 直接复用(重启换 key 会把所有客户端打挂),稳态零写入
-  const existing = paths.resolveApiKey();
-  if (existing.source !== 'none') return { key: existing.key, env: existing.source === 'env' };
-  const key = crypto.randomBytes(24).toString('base64url');
-  try {
-    // 并发首启:claimFile 用 link 仲裁,落败方拿到胜者的 key;
-    // 历史遗留的空/损坏文件被识别为无效内容并自动接管
-    const claim = claimFile(paths.KEY_FILE, `${key}\n`, content => content.trim() !== '');
-    return claim.installed
-      ? { key, generated: true, persisted: true }
-      : { key: claim.content.trim() };
-  } catch (e) {
-    // 落盘失败必须显式告警并打印 key:否则本进程仍在要求鉴权,而
-    // refresh-token.js key 读不到文件会提示"尚无 key",用户被锁在门外且提示误导
-    console.error(`⚠ 无法写入 API key 文件(${e.message})。本进程临时使用以下 key(重启后更换,请先修复写入权限):`);
-    console.error(`  ${key}`);
-    return { key, generated: true, persisted: false };
-  }
 }
 
 // ===== token 热加载缓存 =====
@@ -179,8 +151,6 @@ async function readChatBody(req, config) {
 
 // ===== HTTP 服务 =====
 function createHttpServer({ config, service }) {
-  const { key: apiKey, env: keyEnv, generated: keyGenerated, persisted: keyPersisted = true,
-    envOverridden: keyEnvOverridden = false } = loadApiKey();
   const getToken = createTokenCache(config);
   const allowedHosts = new Set([
     `127.0.0.1:${config.port}`, `localhost:${config.port}`, `[::1]:${config.port}`,
@@ -195,20 +165,6 @@ function createHttpServer({ config, service }) {
     const msLeft = exp - Date.now();
     if (msLeft < 0) return { code: 'token-expired' };
     return { ok: true, token: data.token, msLeft };
-  }
-
-  // 常时比较(先哈希等长,防长度泄露)
-  function safeEqual(a, b) {
-    const ha = crypto.createHash('sha256').update(String(a)).digest();
-    const hb = crypto.createHash('sha256').update(String(b)).digest();
-    return crypto.timingSafeEqual(ha, hb);
-  }
-
-  function bearerState(authorizationHeader) {
-    if (!apiKey) return null;
-    const m = /^Bearer\s+(.+)$/i.exec(String(authorizationHeader || ''));
-    if (!m) return 'auth-missing';
-    return safeEqual(m[1].trim(), apiKey) ? null : 'auth-failed';
   }
 
   const server = http.createServer((req, res) => {
@@ -243,17 +199,6 @@ function createHttpServer({ config, service }) {
     if (req.method !== 'POST' || !/\/(v1\/)?chat\/completions$/.test(url)) {
       service.logReq(req, 404, started, 0, 'no-endpoint');
       return openAiError(res, 404, '端点不存在。可用:POST /v1/chat/completions,GET /v1/models');
-    }
-
-    // 本地鉴权(默认强制):恶意网页对本机的 blind POST 带不上 Bearer key。
-    // auth-missing(无凭据:探测/浏览器盲发)与 auth-failed(凭据错误:客户端
-    // 配错 key)分开记——前者是威胁信号,后者是配置问题
-    const auth = bearerState(req.headers.authorization);
-    if (auth) {
-      service.logReq(req, 401, started, 0, auth);
-      return openAiError(res, 401,
-        `无效或缺失 API key。本代理已启用本地鉴权,key 见: ${paths.display(paths.KEY_FILE)}`,
-        'auth_error', { 'WWW-Authenticate': 'Bearer' });
     }
 
     readChatBody(req, config).then(
@@ -391,10 +336,7 @@ function createHttpServer({ config, service }) {
 
   return {
     server,
-    auth: {
-      apiKey, keyEnv, keyGenerated, keyPersisted, keyEnvOverridden,
-      getToken, tokenState,
-    },
+    auth: { getToken, tokenState },
   };
 }
 

@@ -8,16 +8,14 @@
 |---|---|---|---|
 | 统一认证密码 | DPAPI 加密,`%USERPROFILE%\.dsh-madmodel\creds.json` | 仅以 SM2 加密报文发往 `id.tsinghua.edu.cn` | 不写日志、不进命令行、不经任何第三方 |
 | madmodel token | DPAPI 加密,`token.json` | 仅作为 Bearer 头发往 `madmodel.cs.tsinghua.edu.cn` | 同上 |
-| 本地 API key | 明文,`api-key`(用户目录默认 ACL 保护) | 不出本机 | 用于代理鉴权;`node refresh-token.js key` 可查看 |
 | 对话内容 | 不落盘(默认) | 经本代理发往 madmodel 上游 | `DUMP_FAILED=1` 时失败请求会落盘到状态目录,注意该文件含完整对话 |
 | 设备指纹 | 随凭据文件存储 | 发往学校登录服务用于可信设备登记 | 32 位随机 hex,每次安装重新生成 |
 
 ## 明确不会发生的事
 
 - 密码/token 不写日志、不进 PowerShell 命令行参数、不发送到 `*.tsinghua.edu.cn` 之外的任何地址;
-- API key 不写日志;唯一例外:key 文件落盘失败时,代理会把本进程临时使用的 key 打印到控制台(带 ⚠ 警示)——这是用户配置客户端的唯一途径。该输出会经 dashboard 前缀转发,采集日志/截图时请注意;
 - 登录链重定向仅跟随 `https://*.tsinghua.edu.cn`,被引向校外地址立即中止;
-- 代理只监听 `127.0.0.1`,外部网络无法直连;
+- 代理只监听 `127.0.0.1`,外部网络无法直连(本地无鉴权,边界即本机回环+Host 白名单,见 README 安全设计);
 - 本仓库目录不写入任何运行时数据(诊断/状态文件均在 `%USERPROFILE%\.dsh-madmodel\`)。
 
 ## 漏洞报告

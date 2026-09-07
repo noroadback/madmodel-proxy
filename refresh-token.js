@@ -7,8 +7,7 @@
 //   node refresh-token.js login          # 首次配置:输入学号密码,保存并取一次 token
 //   node refresh-token.js once           # 用已存凭据取一次新 token
 //   node refresh-token.js watch          # 常驻:到期前 30 分钟自动续,失败退避重试
-//   node refresh-token.js status         # 一屏查看运行状态(代理/token/watch/key)
-//   node refresh-token.js key            # 打印代理的 Bearer API key(配置客户端用)
+//   node refresh-token.js status         # 一屏查看运行状态(代理/token/watch)
 //
 // 命令分发与终端交互在 adapters/cli.js,认证业务在 auth-service.js,
 // 调度状态机在 core/scheduler.js。

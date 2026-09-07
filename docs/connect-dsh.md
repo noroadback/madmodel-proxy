@@ -61,47 +61,32 @@ node refresh-token.js login
 [watch] madmodel token 自动续期守护进程已启动(PID 12345)
 [代理] madmodel 反代已启动: http://127.0.0.1:8080/v1
 [代理] 模型: DeepSeek-V4-Flash
-[代理] 本地鉴权: 已启用(本次生成随机 key,客户端 Bearer key 见: %USERPROFILE%\.dsh-madmodel\api-key)
+[代理] 本地无鉴权(客户端 API key 随便填);安全边界为本机回环 + Host 白名单
 [代理] 当前 token 剩余 272 分钟
 ```
 
-首次启动会自动生成一个随机 API key——**接下来 dsh 要用的就是它**。
-(此时 `api-key` 文件已生成,第 3 步直接读取它。)
-
-## 第 3 步:获取 API key
-
-```bat
-node refresh-token.js key
-```
-
-输出一串 32 字符的随机串,复制备用。等效方式:`type %USERPROFILE%\.dsh-madmodel\api-key`。
-
-## 第 4 步:配置 dsh
+## 第 3 步:配置 dsh
 
 在 dsh 的供应商(Provider)配置中,新建或编辑一条 OpenAI 兼容配置:
 
 | 配置项 | 值 |
 |---|---|
 | Base URL | `http://127.0.0.1:8080/v1` |
-| API Key | 第 3 步复制的完整字符串(**不是** `local` 之类的占位符) |
+| API Key | 随便填(如 `none`)——本地无鉴权,字段仅为满足界面非空校验 |
 | 模型名 | `DeepSeek-V4-Flash` |
 
-> 代理默认强制校验 Bearer key(防止本机恶意网页盗用上游配额)。
-> 如果你的 dsh 里沿用了旧版代理时代的占位符(如 `local`),务必换成真实 key,
-> 否则所有请求都会收到 401。
-
-## 第 5 步:验证
+## 第 4 步:验证
 
 在 dsh 里随便发一条消息,收到回复即全部完成。
 
-想先单独确认代理存活,可以(此检查端点不需要 key):
+想先单独确认代理存活,可以:
 
 ```bat
 curl http://127.0.0.1:8080/v1/models
 ```
 
 返回 `{"object":"list","data":[{"id":"DeepSeek-V4-Flash",…}]}` 即代理正常,
-此时问题只会出在 dsh 的 key/模型名配置上。
+此时问题只会出在 dsh 的 Base URL/模型名配置上。
 
 ## 日常运行须知
 
@@ -115,13 +100,12 @@ curl http://127.0.0.1:8080/v1/models
 
 | 现象 | 含义 | 处理 |
 |---|---|---|
-| dsh 报 401"无效或缺失 API key" | key 没配或配错 | `node refresh-token.js key` 重新复制 |
 | dsh 报 401"token 已过期" | 续期守护没在运行 | 看 start.cmd 窗口里 `[watch]` 日志是否报错/停止,死了就重开 start.cmd |
 | dsh 报 503 | 本地无 token | 没做过第 1 步,或窗口里 `[watch]` 日志有报错 |
-| dsh 报 429 | 触发代理限速(60 次/分钟 / 并发 8) | 稍等重试;agent 失控时可暂时关掉代理 |
+| dsh 报 429 | 上游繁忙/过载保护 | 稍等重试;持续出现看代理日志 `overload:` 或 `upstream-err` 条目 |
 | dsh 报 5xx 且提示上游拒绝 | madmodel 服务端问题 | 与本工具无关,稍后再试 |
 
 ## 进阶
 
-- 换端口、自定义 key、关闭鉴权:`PROXY_PORT` / `PROXY_API_KEY` / `PROXY_NO_AUTH` 环境变量(见 README)。
-- 接入其他 OpenAI 兼容客户端:配置方式与 dsh 完全一致(Base URL + key + 模型名)。
+- 换端口:`PROXY_PORT` 环境变量(见 README)。
+- 接入其他 OpenAI 兼容客户端:配置方式与 dsh 完全一致(Base URL + 模型名,key 随便填)。

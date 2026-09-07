@@ -56,7 +56,7 @@ npm test
 
 以下任何一项出现在 PR 里都会被直接拒绝:
 
-- **token / 密码 / API key**:包括你本机的 `token.json`、`creds.json`、`api-key` 内容,以及日志/截图里的 Bearer 头、学号、密码;
+- **token / 密码**:包括你本机的 `token.json`、`creds.json` 内容,以及日志/截图里的 Bearer 头、学号、密码;
 - **真实请求体**:对话内容属于隐私,`DUMP_FAILED=1` 产生的 `last-failed-request.json` 绝不能入库;
 - **本地状态文件**:`~/.dsh-madmodel/` 下的一切(`.gitignore` 已有防御性兜底,不要绕过);
 - **测试里的真实端点或真实账号**:测试注入一律用 `PROXY_UPSTREAM` / `PROXY_TOKEN_FILE` / `MADMODEL_CREDS_FILE` 指向本地假对象。

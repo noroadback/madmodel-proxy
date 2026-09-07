@@ -6,7 +6,6 @@
 //   node smoke-real.js   (前置:代理在跑、token 有效;消耗少量学校配额)
 'use strict';
 
-const { resolveApiKey } = require('./platform/paths');
 const config = require('./config');
 
 const BASE = `http://127.0.0.1:${config.port}`;
@@ -14,7 +13,7 @@ const BASE = `http://127.0.0.1:${config.port}`;
 async function chat(body, timeoutMs) {
   const r = await fetch(`${BASE}/v1/chat/completions`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${resolveApiKey().key}` },
+    headers: { 'Content-Type': 'application/json' }, // 本地无鉴权,key 随便填
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs || 180000),
   });

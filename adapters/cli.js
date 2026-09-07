@@ -1,7 +1,8 @@
 // adapters/cli.js
 // refresh-token.js 的命令分发与终端交互(提示、密码隐藏输入、状态展示)。
 // 认证业务在 auth-service.js,存取在 platform/,调度在 core/scheduler.js。
-// 命令名与输出文案保持稳定:login / once / watch / status / key
+// 命令名保持稳定: login / once / watch / status
+// (key 命令已随本地鉴权一并移除,保留一声友好提示)
 
 'use strict';
 
@@ -11,7 +12,7 @@ const { login, refresh, watch } = require('../auth-service');
 const credentials = require('../platform/credentials');
 const processLock = require('../platform/process-lock');
 const config = require('../config');
-const { WATCH_LOCK, resolveApiKey } = require('../platform/paths');
+const { WATCH_LOCK } = require('../platform/paths');
 
 async function promptCredentials() {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -111,30 +112,8 @@ async function cmdStatus() {
   console.log('watch 续期守护: ' + (watchAlive ? `运行中(PID ${lockPid})`
     : `未运行(随 start.cmd 启动${lockPid ? ';当前锁文件为死进程残留,下次启动自动接管' : ''})`));
 
-  // 4) 凭据与 key(优先级由 paths.resolveApiKey 统一裁定,与代理同源)
+  // 4) 凭据(本地无鉴权,代理不设 key——客户端 API key 随便填)
   console.log('凭据: ' + (credentials.hasAccount() ? '已配置' : '未配置(node refresh-token.js login)'));
-  const keyState = {
-    disabled: '鉴权已关闭(PROXY_NO_AUTH=1),key 不参与鉴权',
-    env: '环境变量 PROXY_API_KEY 已设置(优先于文件)',
-    file: '已生成(查看: node refresh-token.js key)',
-    none: '未生成(首次启动代理时自动生成)',
-  };
-  console.log('API key: ' + keyState[resolveApiKey().source]);
-}
-
-function cmdKey() {
-  const { key, source } = resolveApiKey();
-  if (source === 'disabled') {
-    console.log('本地鉴权已关闭(PROXY_NO_AUTH=1),key 不参与鉴权。');
-    return;
-  }
-  if (source === 'none') {
-    console.log('尚无 API key——首次启动代理时自动生成(双击 start.cmd 或 node proxy.js)。');
-    console.log('也可用环境变量 PROXY_API_KEY 指定自定义 key。');
-    return;
-  }
-  console.log(key);
-  if (source === 'env') console.log('(来自环境变量 PROXY_API_KEY,优先于 key 文件)');
 }
 
 async function runCli(argv) {
@@ -144,9 +123,11 @@ async function runCli(argv) {
     else if (cmd === 'once') await cmdOnce();
     else if (cmd === 'watch') await watch();
     else if (cmd === 'status') await cmdStatus();
-    else if (cmd === 'key') cmdKey();
+    else if (cmd === 'key') {
+      console.log('代理本地无鉴权,已无 key 命令;客户端 API key 随便填。');
+    }
     else {
-      console.log('用法: node refresh-token.js [login|once|watch|status|key]');
+      console.log('用法: node refresh-token.js [login|once|watch|status]');
       process.exit(1);
     }
   } catch (e) {

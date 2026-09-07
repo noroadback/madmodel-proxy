@@ -22,17 +22,17 @@ madmodel（`madmodel.cs.tsinghua.edu.cn`，清华大学高性能计算中心部�
 - **token 自动续期**。到期前 30 分钟自动走完整登录链，代理按文件 mtime 热加载，免重启。
 - **完整统一认证自动化**。SM2 密码加密（强制 CSPRNG，不可用即拒绝加载）、二次认证（微信/短信/TOTP）、可信设备登记（登记后续期免二次认证）。
 - **静态数据加密**。密码与 token 均以 Windows DPAPI（CurrentUser）加密存储，密钥不出 Windows 账户。
-- **本地安全**。Bearer 鉴权（默认强制，自动生成 key）、Host 白名单（防 DNS rebinding）、请求与响应的多重限额和超时，客户端断连即中止上游。
+- **本地安全**。只监听本机回环 + Host 白名单（防 DNS rebinding）、请求与响应的多重限额和超时，客户端断连即中止上游。本地无鉴权，客户端 API key 随便填。
 - **单窗口运行**。start.cmd 经 dashboard.js 同窗拉起守护与代理，`[代理]`/`[watch]` 前缀区分日志，Ctrl+C 或关窗全停。
 - **真实 usage**。对上游注入 `include_usage`（上游默认不回 usage），非流式聚合与流式透传都带真实 token 数，`reasoning_tokens` 单独可见。
 - **参数归一化**。模型名重写、剥离上游拒绝的参数（`logprobs` 等）、把三种"关闭推理"方言统一映射到上游唯一生效的写法，客户端不必为这个端点特调。
-- **离线测试套件**。假上游加子进程，178 项端到端与单元测试，不需要账号、不触网。
+- **离线测试套件**。假上游加子进程，173 项端到端与单元测试，不需要账号、不触网。
 
 ## 测试状态
 
 已在 Windows 11 + Node.js 24 + **dsh**（DeepSeek Harness）实测通过。
 
-**能接入哪些客户端**。任何支持"自定义 OpenAI Base URL"的智能体或客户端都能接入，指向 `http://127.0.0.1:8080/v1`、用本地 key 鉴权即可，协议层就是标准 OpenAI 形态（chat completions + models）。边界也要说清。只有 chat completions 一个业务端点，没有 embeddings、图像、音频；单模型，任意模型名都会被重写为 `DeepSeek-V4-Flash`（见"设计取舍"）；`logprobs`/`n>1` 会被剥离（上游拒绝）；代理宿主机必须是 Windows，客户端本身不限平台。dsh 之外（codex、claude code 等）未逐一验证，欢迎在 issue 里附上你的客户端与结果。
+**能接入哪些客户端**。任何支持"自定义 OpenAI Base URL"的智能体或客户端都能接入，指向 `http://127.0.0.1:8080/v1` 即可，协议层就是标准 OpenAI 形态（chat completions + models）。边界也要说清。只有 chat completions 一个业务端点，没有 embeddings、图像、音频；单模型，任意模型名都会被重写为 `DeepSeek-V4-Flash`（见"设计取舍"）；`logprobs`/`n>1` 会被剥离（上游拒绝）；代理宿主机必须是 Windows，客户端本身不限平台。dsh 之外（codex、claude code 等）未逐一验证，欢迎在 issue 里附上你的客户端与结果。
 
 ## 运行前提与平台支持
 
@@ -48,10 +48,8 @@ rem 1. 首次配置:输入学号+密码(首次含二次认证,只需一次)
 node refresh-token.js login
 rem 2. 启动:单窗口拉起续期守护 + 代理(双击 start.cmd 亦可)
 start.cmd
-rem 3. 随时查看运行状态:代理/token/watch/key 一屏汇总(双击 status.cmd 亦可)
+rem 3. 随时查看运行状态:代理/token/watch 一屏汇总(双击 status.cmd 亦可)
 node refresh-token.js status
-rem 4. 打印 API key(配置客户端用,只生成一次,之后固定)
-node refresh-token.js key
 ```
 
 最容易卡住的一步是首次 login 的二次认证，输错验证码重试即可，登记可信设备之后续期不再需要它。详细步骤见 [docs/connect-dsh.md](docs/connect-dsh.md)。
@@ -61,7 +59,7 @@ node refresh-token.js key
 | 配置项 | 值 |
 |---|---|
 | Base URL | `http://127.0.0.1:8080/v1` |
-| API Key | 上面 `key` 命令的输出 |
+| API Key | 随便填（本地无鉴权，多数客户端要求非空，填 `none` 即可） |
 | 模型 | `DeepSeek-V4-Flash` |
 
 ### 接入任意 OpenAI 兼容智能体
@@ -71,23 +69,21 @@ node refresh-token.js key
 | 本项目要填的 | 界面上的常见叫法 |
 |---|---|
 | `http://127.0.0.1:8080/v1` | Base URL / API 地址 / Endpoint / 接口地址（有的要求带 `/v1`，有的界面自带后缀只填 `http://127.0.0.1:8080`，按其示例格式） |
-| `key` 命令的输出 | API Key / 密钥 / Token（粘贴整串） |
+| 随便填（如 `none`） | API Key / 密钥 / Token（本地无鉴权，仅为满足界面的非空校验） |
 | `DeepSeek-V4-Flash` | Model / 模型名 / 型号 |
 
 几个常见界面形态的对应关系。
 
 - **dsh / codex / claude code 类命令行工具**。配置文件里找 `base_url`（或 `OPENAI_BASE_URL` 环境变量）、`api_key`、`model` 三项填入即可。
 - **带"添加供应商"按钮的桌面应用**（Cherry Studio、ChatBox、LobeChat 等）。选"OpenAI"或"自定义/OpenAI 兼容"类型，把上面三个值填进对应输入框，模型列表可以点"获取"拉取（代理的 `/v1/models` 会返回 DeepSeek-V4-Flash）。
-- **LangChain / OpenAI SDK 代码调用**。`new OpenAI({ baseURL: 'http://127.0.0.1:8080/v1', apiKey: '你的key' })`，模型名传 `DeepSeek-V4-Flash`。
+- **LangChain / OpenAI SDK 代码调用**。`new OpenAI({ baseURL: 'http://127.0.0.1:8080/v1', apiKey: 'none' })`，模型名传 `DeepSeek-V4-Flash`。
 
-两个填错时的症状，方便对号入座。界面拉取模型列表失败或列表为空，多半是 Base URL 少了或多带了 `/v1`；请求全部 401，是 key 没粘贴全或界面里有默认的旧 key。
+填错时的症状，方便对号入座。界面拉取模型列表失败或列表为空，多半是 Base URL 少了或多带了 `/v1`。
 
 ## 环境变量
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `PROXY_API_KEY` | 自动生成 | 显式指定本地鉴权 key（优先于 key 文件） |
-| `PROXY_NO_AUTH` | 关 | `=1` 关闭本地鉴权（仅测试场景） |
 | `PROXY_PORT` | `8080` | 监听端口 |
 | `PROXY_NO_GZIP` | 关 | `=1` 关闭发往上游的请求体 gzip 编码 |
 | `PROXY_REFRESH_AHEAD_MS` | 1800000 | 提前续期窗口，正整数毫秒 |
@@ -99,8 +95,7 @@ node refresh-token.js key
 
 ## 安全提示（配置前必读）
 
-- **`api-key` 文件是明文保存**（位于 `%USERPROFILE%\.dsh-madmodel\api-key`）。它需要人工抄进客户端配置、离开本机即无用，这是有意取舍。文件受用户目录 ACL 保护，但请勿把它提交到任何仓库或截图外发。
-- **不要设置 `PROXY_NO_AUTH=1` 后监听非本机地址**。`PROXY_NO_AUTH` 本为离线测试而设，关闭鉴权后任何能触达该端口的进程都可匿名消耗你的配额。代理硬编码只监听 `127.0.0.1`，请保持这一边界。
+- **本地无鉴权**。代理不设 key，安全边界是本机回环（只监听 `127.0.0.1`）+ Host 白名单。本机其他进程都能调用你的配额——单人使用的个人机器上这是可接受的取舍，但**不要把代理端口暴露给其他机器**（代理硬编码只听本机，改动它请自行承担）。
 - **`DUMP_FAILED=1` 会保存完整请求体**到 `%USERPROFILE%\.dsh-madmodel\last-failed-request.json`，其中包含完整对话内容，属于隐私数据。排障后请及时删除，更不要提交或外发该文件。
 
 更多数据流向（什么数据去了哪、没去哪）见 [SECURITY.md](SECURITY.md)。
@@ -110,7 +105,6 @@ node refresh-token.js key
 | 现象 | 原因与处理 |
 |---|---|
 | 请求 401 `token 已过期` | watch 续期守护未运行或续期失败。先 `node refresh-token.js status` 查看 watch 与 token 状态；watch 未运行就用 `start.cmd` 启动；续期失败按日志里的错误码处理（见下） |
-| 请求 401 `无效或缺失 API key` | 客户端 Bearer key 与代理不一致。`node refresh-token.js key` 重新查看，粘贴进客户端配置；注意 `PROXY_API_KEY` 环境变量优先于 key 文件 |
 | 启动报 `端口 8080 已被占用` | 代理已在运行（start.cmd 重复启动），或端口被其他程序占用。确认是旧实例后直接复用；确需另开实例用 `PROXY_PORT` 换端口 |
 | 上游 401（认证失败） | token 失效但代理尚未感知。等 watch 续期完成（日志出现"token 已热加载"），或手动 `node refresh-token.js once` |
 | 上游 429（限流/繁忙） | 上游服务繁忙、上下文逼近 256K、或请求体超限。压缩上下文后重试；若客户端并发/重试过猛，靠客户端自身的退避收敛（代理业务层不限并发） |
@@ -135,7 +129,7 @@ start.cmd → dashboard.js(单窗口:前缀交错显示,Ctrl+C/关窗全停)
  │     └─ adapters/cli.js 命令分发 → auth-service.js 认证业务
  │           └─ core/scheduler.js 续期状态机(WAITING/REFRESHING/BACKOFF/STOPPED)
  └─ proxy.js                 启动入口:组装 config + core + adapters 并监听
-       └─ adapters/http-server.js   HTTP 适配:路由/Host+Bearer 鉴权/请求体读取/
+       └─ adapters/http-server.js   HTTP 适配:路由/Host 白名单/请求体读取/
        │                          响应写出/token 热加载缓存
              └─ core/proxy-service.js  业务流程:认证→归一化→上游→映射→响应
                    ├─ core/upstream-client.js     上游调用(单 AbortController,
@@ -153,7 +147,7 @@ start.cmd → dashboard.js(单窗口:前缀交错显示,Ctrl+C/关窗全停)
 adapters/ 只做 HTTP 与终端 I/O。
 
 platform/:
-  paths.js          状态文件路径 + 本地鉴权 key 优先级(唯一来源)
+  paths.js          状态文件路径(唯一来源)
   file-store.js     原子写/独占安装/争用仲裁 + 文件事件唤醒
   credentials.js    凭据与 token 存取接口 → windows/credentials.js(DPAPI)
   process-lock.js   进程锁接口 → windows/process-lock.js(PID 探活)
@@ -170,18 +164,17 @@ platform/:
 
 | 层 | 机制 |
 |---|---|
-| 网络 | 只监听 127.0.0.1，外部不可达 |
+| 网络 | 只监听 127.0.0.1，外部不可达；本地无鉴权（安全边界即本机回环） |
 | 防跨域读取 | Host 头白名单（阻断 DNS rebinding） |
-| 防盲写入 | Bearer key 强制鉴权（防恶意网页 CSRF 式盗用配额） |
 | 防资源耗尽 | 连接数上限（32）、inflight 进程保护硬上限（64，不可配置）、请求头/请求体/慢速发送三段超时、Content-Length 预检（业务层无限流，见"设计取舍"） |
 | 防内存耗尽 | 上游响应体双路径上限（JSON 5MB / SSE 64MB） |
 | 静态数据 | 密码与 token DPAPI 加密；DPAPI 调用数据走 stdin，不进命令行/审计日志 |
 | 随机数 | SM2 熵池强制接 Node WebCrypto CSPRNG，不可用即拒绝启动 |
 | 出站安全 | 登录链重定向仅跟随 `https://*.tsinghua.edu.cn`，被引向校外即中止 |
 
-**威胁画像**。本代理只监听 127.0.0.1，能触达它的只有本机进程和浏览器页面。日常使用中真正高频的对手，是不可靠的上游（网关断流、连接悬挂）和失控的客户端（agent 重试风暴、超大请求体）。上表"防资源耗尽/防内存耗尽"两层主要服务于后者；面向攻击者的层（鉴权、Host 白名单）针对的是恶意网页盲调这类低频但真实的场景。防御触发会留痕，含 401/403/413/429 在内的早退请求同样进访问日志，事后可查"有没有进程在打我、限速挡掉了多少"。
+**威胁画像**。本代理只监听 127.0.0.1，能触达它的只有本机进程和浏览器页面。日常使用中真正高频的对手，是不可靠的上游（网关断流、连接悬挂）和失控的客户端（agent 重试风暴、超大请求体）。上表"防资源耗尽/防内存耗尽"两层主要服务于后者。防御触发会留痕，含 403/413/429 在内的早退请求同样进访问日志，事后可查"有没有进程在打我"。
 
-**DPAPI 的覆盖面**。CurrentUser 范围的 DPAPI 防的是文件离开本机或当前 Windows 账户（磁盘被离线挂载、U 盘拷贝、网盘同步快照）。它防不了以当前用户身份运行的代码，后者一次系统调用就能解密，用户态无解，对这类威胁本项目的控制是架构层的进程隔离，代理进程从不读取 creds.json。`api-key` 文件是明文，这是有意的取舍。它需要人工抄进客户端配置，离开本机就没用，且受用户目录 ACL 保护。
+**DPAPI 的覆盖面**。CurrentUser 范围的 DPAPI 防的是文件离开本机或当前 Windows 账户（磁盘被离线挂载、U 盘拷贝、网盘同步快照）。它防不了以当前用户身份运行的代码，后者一次系统调用就能解密，用户态无解，对这类威胁本项目的控制是架构层的进程隔离，代理进程从不读取 creds.json。
 
 ## 设计取舍与已知限制
 
@@ -189,6 +182,7 @@ platform/:
 - **学校端点硬编码**。WebVPN 前缀、登录表单 URL、漫游 ID 等实测于 2026-09，学校改版即失效。失效时程序会给出明确错误信息，请提 issue。
 - **CookieJar / URL 解析为手写简化版**。登录链是固定已验证路径，未实现 Domain/Expires 等标准语义。
 - **单模型**（`DeepSeek-V4-Flash`）。
+- **本地无鉴权**（2026-09-07 移除）。安全边界是本机回环 + Host 白名单，本机其他进程可调用配额——个人单用户机器上的有意取舍；需要鉴权的用户可在 `adapters/http-server.js` 自行加回。
 - **业务层无限流，只保留进程保护**（2026-09-06 调整）。多子代理编排是合法负载，原来的并发 8 会常态化误伤，所以移除了业务层限流，留下一个固定的 inflight 硬上限（64，代码常量，刻意不可配置）。这个上限只代表本地进程保护，防失控客户端拖垮内存和连接，与上游并发能力无关（上游真实容量未测）。超限时返回 429，本地过载与上游 429 可以区分。本地过载的响应文案是"代理过载保护（进程保护）"、`type` 为 `rate_limit`、日志 note 为 `overload:inflight=N`；上游 429 经翻译携带上游原文、日志 note 为 `upstream-err`。`server.maxConnections=32` 与各级超时、字节上限继续兜底。有界探测（24 并发突发）未见上游限流，但长期持续负载下的上游行为未验证，重度使用时留意 `overload:` 日志。
 - **watch 被强杀后锁文件残留**（任务管理器）。下次启动自动探活接管（Windows 信号处理限制，见源码注释）。
 
@@ -237,11 +231,11 @@ npm test
 - **全程离线**。不需要账号、不访问真实校方服务、不消耗配额，任何网络环境可跑，失败以非零退出码结束。
 - **`npm run smoke` 不属于离线测试**。它是真实流量冒烟（`smoke-real.js`），需要代理在线、真实校方服务和有效 token，并消耗少量配额。离线套件只能覆盖已知的上游帧型，空心跳帧这类行为只有真实流量能暴露（2026-09-05 曾因此事故）。凡是改动 SSE 解析、错误处理、超时等协议行为，改完先跑冒烟再算完成。
 
-共 178 项断言，分三层（全部离线；另有 `test-creds.js` 的 3 项 DPAPI 自检不计入分项）。
+共 173 项断言，分三层（全部离线；另有 `test-creds.js` 的 3 项 DPAPI 自检不计入分项）。
 
 - `test-auth.js`（38 项）。认证链纯逻辑，包括响应体 charset 解码与嗅探回退、重定向白名单（含 userinfo 伪装绕过尝试）、CookieJar 路径匹配与合并 Set-Cookie 切分、JWT 过期兜底、WebVPN URL 改写。
 - `node --test` 单元测试（71 项）。`test-config.js`、`test-sse.js`、`test-payload.js`、`test-aggregator.js`、`test-errors.js`、`test-upstream.js`、`test-scheduler.js`（10 项，调度状态机）、`test-inflight.js`（8 项，进程保护硬上限与异常路径释放）、`test-wakeup.js`、`test-login-prompt.js`（管道凭据回归），覆盖 core 与 platform 各模块的接口契约。本地假上游，不起真实连接；调度器与 inflight 守卫用注入依赖离线驱动。
-- `test-proxy.js`（69 项）。假上游加子进程的代理端到端，覆盖鉴权、Host 白名单、SSE 透传与聚合、错误翻译、SSE 内嵌错误与 HTML 错误页翻译、流截断不伪装成功、坏帧不静默跳过、空数据帧容忍、大块合法行不误触上限、`[DONE]` 后挂起不泄漏连接、周期心跳与慢速 JSON 的总时限、超限、断连中止、并发透传（16 并发全部 200）、早退日志留痕、usage 注入、参数归一化、干净目录 bootstrap、坏锁与空锁恢复、key 命令与环境变量一致性。
+- `test-proxy.js`（64 项）。假上游加子进程的代理端到端，覆盖无鉴权直通、Host 白名单、SSE 透传与聚合、错误翻译、SSE 内嵌错误与 HTML 错误页翻译、流截断不伪装成功、坏帧不静默跳过、空数据帧容忍、大块合法行不误触上限、`[DONE]` 后挂起不泄漏连接、周期心跳与慢速 JSON 的总时限、超限、断连中止、并发透传（16 并发全部 200）、早退日志留痕、usage 注入、参数归一化、干净目录 bootstrap、坏锁与空锁恢复、key 命令与环境变量一致性。
 
 ## 贡献
 
