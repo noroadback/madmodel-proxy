@@ -78,7 +78,7 @@ function launch(tag, script, args) {
   return child;
 }
 
-console.log('madmodel 单窗口模式:watch 续期守护 + 反代同窗运行');
+console.log('madmodel 单窗口模式:watch 续期守护 + 本地端点同窗运行');
 console.log('停止:本窗口 Ctrl+C 或直接关窗(两者一起停;watch 锁残留由下次启动自动探活接管)');
 console.log('日志会显示每次对话的 token 用量;想看状态再双击一次 start.cmd(在跑即显示体检)');
 console.log('──────────────────────────────────────────────');

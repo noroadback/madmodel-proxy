@@ -99,8 +99,8 @@ let activeScheduler = null;
 async function watch() {
   const lock = processLock.acquirePidLock(WATCH_LOCK);
   if (!lock.ok) {
-    console.error(`已有 watch 守护在运行(PID ${lock.pid},锁: ${WATCH_LOCK})。本次不重复启动。`);
-    console.error('若确认该进程并非 watch(锁残留且 PID 被系统复用),删除上述锁文件后重试即可。');
+    console.error(`已有 watch 守护在运行(PID ${lock.pid},锁: ${WATCH_LOCK}),不重复启动。`);
+    console.error('锁为死进程残留时,删除该锁文件后重试。');
     process.exit(0);
   }
   process.on('exit', () => processLock.releasePidLock(WATCH_LOCK));

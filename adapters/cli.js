@@ -112,7 +112,7 @@ async function cmdStatus() {
   console.log('watch 续期守护: ' + (watchAlive ? `运行中(PID ${lockPid})`
     : `未运行(随 start.cmd 启动${lockPid ? ';当前锁文件为死进程残留,下次启动自动接管' : ''})`));
 
-  // 4) 凭据(本地无鉴权,代理不设 key——客户端 API key 随便填)
+  // 4) 凭据(本地无鉴权,代理不设 key,客户端 API key 填任意值)
   console.log('凭据: ' + (credentials.hasAccount() ? '已配置' : '未配置(node refresh-token.js login)'));
 }
 
@@ -124,7 +124,7 @@ async function runCli(argv) {
     else if (cmd === 'watch') await watch();
     else if (cmd === 'status') await cmdStatus();
     else if (cmd === 'key') {
-      console.log('代理本地无鉴权,已无 key 命令;客户端 API key 随便填。');
+      console.log('代理本地无鉴权,已无 key 命令;客户端 API key 填任意值。');
     }
     else {
       console.log('用法: node refresh-token.js [login|once|watch|status]');
