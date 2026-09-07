@@ -19,7 +19,7 @@ node refresh-token.js login
 
 想看运行状态时，再双击一次桌面图标（或 start.cmd）即可——服务在跑就会显示一屏体检（代理/token/续期守护/凭据），不会重复启动；命令行形态是 `node refresh-token.js status`。
 
-然后在你的智能体里填这三个值。
+然后在你的智能体里填这几个值。
 
 | 配置项 | 值 |
 |---|---|
