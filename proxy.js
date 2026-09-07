@@ -51,7 +51,7 @@ httpServer.server.listen(config.port, config.host, () => {
   const auth = httpServer.auth;
   console.log(`madmodel 本地端点已启动: http://${config.host}:${config.port}/v1`);
   console.log(`模型: ${config.models.join(', ')}`);
-  console.log('本地无鉴权(客户端 API key 随便填);安全边界为本机回环 + Host 白名单');
+  console.log('本地无鉴权(客户端 API key 填任意值);安全边界为本机回环 + Host 白名单');
   console.log(`token 文件: ${paths.display(paths.TOKEN_FILE)}(热加载,续期免重启)`);
   const t = auth.getToken();
   if (t) {

@@ -1,6 +1,6 @@
 # madmodel-proxy
 
-把清华的 DeepSeek 服务（https://madmodel.cs.tsinghua.edu.cn/）变成本地 OpenAI 端点。自动完成统一认证登录与 token 续期，上游的协议问题在本层处理，客户端连 `http://127.0.0.1:8080/v1`。
+把清华的 DeepSeek 服务（https://madmodel.cs.tsinghua.edu.cn/）变成本地 OpenAI 端点。token 过期自动续期，上游接口的兼容性问题在代理层处理，客户端只需连 `http://127.0.0.1:8080/v1`。
 
 ## 使用
 
@@ -28,13 +28,13 @@ node refresh-token.js login
 
 详细步骤与故障排查见 [docs/connect-dsh.md](docs/connect-dsh.md)。
 
-## 它解决了什么
+## 为什么需要它
 
 madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件事。
 
-**token 烦**。官方 key 只有 5 小时有效期，获取方式是网页登录手动复制。重度使用意味着每天数次打断。本工具用统一认证链自动续期，到期前 30 分钟换新，代理热加载，客户端无感。
+**token 有效期短**。key 只有 5 小时有效期，只能网页登录后手动复制，重度使用一天要重复数次。本工具用统一认证链自动续期，到期前 30 分钟换新，代理热加载。
 
-**行为怪**（2026-09 直连实测）。非流式请求 60 秒整被网关掐断；WAF 误拦含工具语法的请求体；一切错误包在 `HTTP 200` 里返回"服务器繁忙"；`/v1/models` 返回网页 HTML。本工具在代理层逐项适配，对上游恒以流式请求、客户端要非流式就聚合，错误翻译回真实状态码。
+**接口行为与客户端预期不符**。非流式请求 60 秒整被网关掐断；WAF 会拦截含工具语法的请求体；错误都以 `HTTP 200` 返回"服务器繁忙"；`/v1/models` 返回网页 HTML（以上为 2026-09 直连实测）。本工具在代理层逐项适配，对上游恒以流式请求、客户端要非流式就聚合，错误翻译回真实状态码。
 
 ## 特性
 
@@ -42,13 +42,12 @@ madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件�
 - **token 全自动**。到期前 30 分钟自动走完整登录链（含二次认证、可信设备登记），热加载免重启
 - **DPAPI 加密**。密码与 token 静态加密存储，仅当前 Windows 账户可解
 - **单窗口运行**。start.cmd 同窗拉起守护与代理，Ctrl+C 或关窗全停
-- **真实 usage**。代理注入 `include_usage`，客户端拿到真实 token 计数
 
 ## 边界
 
 - **Windows 专用**。凭据存储依赖 DPAPI，Linux/macOS 跑不了代理与续期
 - **清华 madmodel 专用**。登录链实测于 2026-09，学校改版即失效（失效会报明确错误）
-- **本地无鉴权**。安全边界是只监听 `127.0.0.1` + Host 白名单，客户端 API key 随便填
+- **本地无鉴权**。只监听 `127.0.0.1` + Host 白名单，客户端 API key 填任意值
 - **只有 chat completions**。无 embeddings、图像、音频；单模型，任意模型名都会被重写为 `DeepSeek-V4-Flash`；`logprobs`/`n>1` 被剥离（上游拒绝）
 
 ## 常见问题
@@ -56,7 +55,7 @@ madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件�
 | 现象 | 处理 |
 |---|---|
 | 请求 401 `token 已过期` | watch 守护没在跑或续期失败。`node refresh-token.js status` 一屏看清；没跑就开 start.cmd |
-| 启动报 `端口 8080 已被占用` | 代理已在跑（start.cmd 重复双击），直接用；要另开实例用 `PROXY_PORT` |
+| 启动报 `端口 8080 已被占用` | 代理已在运行，直接使用；需另开实例时用 `PROXY_PORT` |
 | 上游 401/502/429 | 上游侧问题，通常自愈；持续出现提 issue 附代理日志 |
 | token 长期无人续期 | 改过密码或二次认证过期，重跑一次 `node refresh-token.js login` |
 
@@ -70,15 +69,12 @@ madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件�
 | `PROXY_STREAM_TOTAL_MS` | 1200000 | 单次流式请求总时限（毫秒） |
 | `DUMP_FAILED` | 关 | `=1` 时被上游拒绝的请求体落盘，含完整对话（隐私），排障后删 |
 
-其余调度类变量与测试注入变量见源码 `config.js` 注释。
-
 ## 更多
 
 - 详细接入指南与故障排查，见 [docs/connect-dsh.md](docs/connect-dsh.md)。
 - 上游实测行为与设计取舍，见 [CHANGELOG.md](CHANGELOG.md)。
 - 数据流向与安全边界，见 [SECURITY.md](SECURITY.md)。
 - 参与贡献，见 [CONTRIBUTING.md](CONTRIBUTING.md)。
-- 改动协议行为后的验证用 `npm run smoke`，它是真实流量冒烟（需 token，消耗少量配额）。
 
 本工具仅供清华大学师生在遵守学校相关规定的前提下个人使用，不提供配额共享，请勿用于服务他人的用途。
 
