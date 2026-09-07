@@ -26,7 +26,7 @@ node refresh-token.js login
 
 ```
 [watch] madmodel token 自动续期守护进程已启动(PID 12345)
-[代理] madmodel 反代已启动: http://127.0.0.1:8080/v1
+[代理] madmodel 本地端点已启动: http://127.0.0.1:8080/v1
 [代理] 模型: DeepSeek-V4-Flash
 [代理] 本地无鉴权(客户端 API key 随便填);安全边界为本机回环 + Host 白名单
 [代理] 当前 token 剩余 272 分钟

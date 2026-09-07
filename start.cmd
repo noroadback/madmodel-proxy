@@ -39,6 +39,6 @@ if %errorlevel%==0 (
   exit /b 0
 )
 
-echo Starting madmodel (watch daemon + reverse proxy, single window)...
+echo Starting madmodel (watch daemon + local endpoint, single window)...
 node "%~dp0dashboard.js"
 pause
