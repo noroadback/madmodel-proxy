@@ -25,6 +25,11 @@ module.exports = Object.freeze({
   port: PORT,
   model: 'DeepSeek-V4-Flash-0731',
   models: Object.freeze(['DeepSeek-V4-Flash-0731']),
+  // 上游能力元数据,经 /v1/models 暴露给接入的 agent 工具(免得各自猜默认值)。
+  // 2026-09-08 实测:上下文 262,144(256K,二分精测 262,135+1 过 / ~262,145 拒);
+  // 输出参数实测接受到 65,536(模型自然停止早于此)
+  contextWindow: 262144,
+  maxModelTokens: 65536,
   // PROXY_UPSTREAM / PROXY_TOKEN_FILE:测试注入用(端到端测试指向本地假上游)
   upstream: process.env.PROXY_UPSTREAM || 'https://madmodel.cs.tsinghua.edu.cn/v1/chat/completions',
   tokenFile: process.env.PROXY_TOKEN_FILE || paths.TOKEN_FILE,

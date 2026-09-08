@@ -184,11 +184,26 @@ function createHttpServer({ config, service }) {
       return openAiError(res, 403, 'Host 头不在白名单,已拒绝(本代理仅限本机使用)');
     }
 
-    // 伪造 models 端点(上游不存在该端点,返回 SPA HTML)
+    // 伪造 models 端点(上游不存在该端点,返回 SPA HTML)。附带能力元数据:
+    // dsh/pi-ai 读 context_window/context_length/max_output_tokens/max_tokens,
+    // LM Studio 读 max_context_length,vLLM 惯例是 max_model_len——各客户端
+    // 约定不同,一并挂上,让接入的 agent 工具自动拿到真实上下文而非猜默认
     if (req.method === 'GET' && (url === '/v1/models' || url === '/models')) {
       return sendJson(res, 200, {
         object: 'list',
-        data: config.models.map(id => ({ id, object: 'model', created: 1720000000, owned_by: 'tsinghua-madmodel' })),
+        data: config.models.map(id => ({
+          id,
+          object: 'model',
+          created: 1720000000,
+          owned_by: 'tsinghua-madmodel',
+          name: id,
+          context_window: config.contextWindow,
+          context_length: config.contextWindow,
+          max_model_len: config.contextWindow,
+          max_context_length: config.contextWindow,
+          max_output_tokens: config.maxModelTokens,
+          max_tokens: config.maxModelTokens,
+        })),
       });
     }
     // OpenAI 风格根路径
