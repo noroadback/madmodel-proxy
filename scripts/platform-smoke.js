@@ -24,8 +24,12 @@ let failed = 0;
 function ok(name) { console.log(`✓ ${name}`); }
 function bad(name, err) {
   failed++;
+  const msg = String(err && err.message ? err.message : err).split('\n').slice(0, 3).join(' | ').slice(0, 400);
   console.error(`✗ ${name}`);
-  console.error(`  ${err && err.message ? err.message.split('\n')[0] : err}`);
+  console.error(`  ${msg}`);
+  // GitHub workflow command:失败详情进 check-run annotation——匿名 API 可读,
+  // 免登录就能拿到远端平台(macOS runner)的失败原因
+  console.log(`::error title=platform-smoke::✗ ${name} :: ${msg}`);
 }
 
 function assert(cond, msg) { if (!cond) throw new Error(msg); }

@@ -34,6 +34,18 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
+      # macOS runner 的登录钥匙串在无 GUI 会话下是锁定的,add-generic-password
+      # 会报 "user interaction is not allowed"。建一个解锁的专用钥匙串设为默认,
+      # 等价于真机上"用户已登录、钥匙串可用"的环境。仅 CI 环境准备,产品代码
+      # 对真机行为不做任何让步
+      - name: Prepare keychain (macOS only)
+        if: runner.os == 'macOS'
+        run: |
+          security create-keychain -p ci "$HOME/Library/Keychains/ci.keychain-db"
+          security list-keychains -d user -s "$HOME/Library/Keychains/ci.keychain-db"
+          security default-keychain -s "$HOME/Library/Keychains/ci.keychain-db"
+          security unlock-keychain -p ci "$HOME/Library/Keychains/ci.keychain-db"
+          security set-keychain-settings -lut 21600 "$HOME/Library/Keychains/ci.keychain-db"
       # 跨平台"启动+存储"冒烟(临时状态目录,不访问学校服务、不消耗配额):
       # 验证各平台凭据存储原语(Windows DPAPI / macOS 钥匙串 / Linux 机器绑定
       # 加密)的写入-读回往返、proxy 无 token 启动探活、watch 守护调度循环
