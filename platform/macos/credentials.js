@@ -25,10 +25,15 @@ const SERVICE = 'madmodel-proxy';
 const ACCOUNT_PASSWORD = 'password';
 const ACCOUNT_TOKEN = 'token';
 
+// 秘密以 base64 编码过钥匙串命令行通道:security CLI 对非 ASCII 的 argv 与
+// 输出编码行为不可靠(CI 于 macOS runner 实测,含中文/符号的密码与 token
+// 写入成功但读回损坏),base64 是纯 ASCII,对任何编码假设都字节精确。钥匙串
+// 条目里存的是 base64 形态(钥匙串访问.app 手动查看所见即此),读回后解码
 function keychainWrite(account, secret) {
+  const b64 = Buffer.from(String(secret), 'utf8').toString('base64');
   const args = ['add-generic-password', '-U',
     '-s', SERVICE, '-a', account,
-    '-w', String(secret),
+    '-w', b64,
     '-T', '/usr/bin/security'];
   try {
     execFileSync('security', args, { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -43,9 +48,10 @@ function keychainWrite(account, secret) {
 // 条目不存在/钥匙串锁定:security 非零退出,按无数据处理
 function keychainRead(account) {
   try {
-    return execFileSync('security',
+    const out = execFileSync('security',
       ['find-generic-password', '-s', SERVICE, '-a', account, '-w'],
-      { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trimEnd();
+      { stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+    return Buffer.from(out.trim(), 'base64').toString('utf8');
   } catch (e) {
     return null;
   }

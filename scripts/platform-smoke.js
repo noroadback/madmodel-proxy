@@ -33,6 +33,8 @@ function bad(name, err) {
 }
 
 function assert(cond, msg) { if (!cond) throw new Error(msg); }
+// 失配诊断:写入值与读回值都进错误消息(annotation 可见),损坏形态一目了然
+const show = v => `${JSON.stringify(String(v))}(len ${String(v).length})`;
 
 // 挑一个空闲端口:listen(0) 拿到后立即释放,交给子进程用
 function freePort() {
@@ -86,12 +88,13 @@ async function main() {
   const credentials = require('../platform/credentials');
 
   // ---- 1) 凭据与 token 存储往返(非 ASCII 秘密顺带验证编码路径) ----
+  const PW = 'pass-马Φ"quote\\slash';
   try {
-    credentials.writeAccount('smoke-user', 'pass-马Φ"quote\\slash', 'smoke-fp');
+    credentials.writeAccount('smoke-user', PW, 'smoke-fp');
     const acc = credentials.readAccount();
-    assert(acc && acc.username === 'smoke-user', 'username 往返不一致');
-    assert(acc.password === 'pass-马Φ"quote\\slash', 'password 往返不一致');
-    assert(acc.fingerPrint === 'smoke-fp', 'fingerprint 往返不一致');
+    assert(acc && acc.username === 'smoke-user', 'username 往返不一致: 写入 "smoke-user" 读回 ' + show(acc && acc.username));
+    assert(acc.password === PW, 'password 往返不一致: 写入 ' + show(PW) + ' 读回 ' + show(acc && acc.password));
+    assert(acc.fingerPrint === 'smoke-fp', 'fingerprint 往返不一致: 写入 "smoke-fp" 读回 ' + show(acc && acc.fingerPrint));
     assert(credentials.hasAccount() === true, 'hasAccount 应为 true');
     ok('凭据写入-读回往返(' + process.platform + ' 存储原语)');
   } catch (e) { bad('凭据写入-读回往返', e); }
@@ -100,8 +103,8 @@ async function main() {
     const expiresAt = Date.now() + 3600e3;
     credentials.writeToken('tok-►-smoke', expiresAt);
     const t = credentials.readToken();
-    assert(t && t.token === 'tok-►-smoke', 'token 往返不一致');
-    assert(t.expiresAt === expiresAt, 'expiresAt 往返不一致');
+    assert(t && t.token === 'tok-►-smoke', 'token 往返不一致: 写入 "tok-►-smoke" 读回 ' + show(t && t.token));
+    assert(t.expiresAt === expiresAt, 'expiresAt 往返不一致: 写入 ' + expiresAt + ' 读回 ' + (t && t.expiresAt));
     ok('token 写入-读回往返');
   } catch (e) { bad('token 写入-读回往返', e); }
 
