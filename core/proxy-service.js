@@ -93,27 +93,37 @@ function createProxyService(deps) {
     return { payload, clientWantsStream, normNote: normalized.length ? ` norm[${normalized.join(' ')}]` : '' };
   }
 
-  // 上游结果 → 终态描述。每类结果只在这里转换一次,流式/聚合仅在 note 前缀不同
+  // 上游结果 → 终态描述({status, note, message};failed-stream 带标记,两条
+  // 路径对它的收尾各有额外上下文要记)。每类结果只在这里转换一次,
+  // 流式/聚合仅在 note 前缀不同
   function mapResult(result, prefix) {
     switch (result.type) {
       case 'timeout':
         if (result.phase === 'idle') {
-          return { kind: 'error', status: 504, note: 'idle-timeout',
+          return { status: 504, note: 'idle-timeout',
             message: `上游流式空闲超时(${config.streamIdleTimeout / 1000}s 无数据)` };
         }
         if (result.phase === 'headers') {
           const message = `上游 ${config.upstreamHeaderTimeout / 1000}s 未返回响应头(连接或网关挂起)`;
-          return { kind: 'network', note: `proxy-err:${message.slice(0, 60)}`, message };
+          return { status: 502, note: `proxy-err:${message.slice(0, 60)}`, message };
         }
-        return { kind: 'failed-stream', ...(describeFailedStream(result, prefix, config)) };
+        return { status: 502, failedStream: true, ...describeFailedStream(result, prefix, config) };
       case 'protocol-error':
-        return { kind: 'failed-stream', ...describeFailedStream(result, prefix, config) };
+        return { status: 502, failedStream: true, ...describeFailedStream(result, prefix, config) };
       case 'network-error':
-        return { kind: 'network', note: `proxy-err:${String(result.cause).slice(0, 60)}`,
+        return { status: 502, note: `proxy-err:${String(result.cause).slice(0, 60)}`,
           message: `代理到上游请求失败: ${result.cause}` };
       default:
         return null; // stream/completion/upstream-error/aborted 由调用方分支处理
     }
+  }
+
+  // 统一错误收尾:记一条日志,未发头回错误响应;流式路径若 SSE 头已发出,
+  // 状态码无法再改,只能断流让客户端按截断处理
+  function failRequest(ctx, mapped) {
+    logReq(ctx.req, mapped.status, ctx.started, ctx.size, mapped.note);
+    if (!ctx.sseHeadersSent()) return ctx.sendError(mapped.status, mapped.message);
+    ctx.endResponse();
   }
 
   async function handleRequest(ctx) {
@@ -205,29 +215,20 @@ function createProxyService(deps) {
     }
     const mapped = mapResult(result, 'stream');
     if (mapped) {
-      if (mapped.kind === 'error') {
-        logReq(req, mapped.status, started, size, mapped.note);
-        if (!ctx.sseHeadersSent()) return ctx.sendError(mapped.status, mapped.message);
-        ctx.endResponse();
-        return;
-      }
-      if (mapped.kind === 'network') {
-        logReq(req, 502, started, size, mapped.note);
-        if (!ctx.sseHeadersSent()) return ctx.sendError(502, mapped.message);
-        ctx.endResponse();
-        return;
-      }
       // failed-stream:不能补 [DONE] 伪装成完整回答。已发头则断流,客户端的
       // 截断检测/重试接手;stream-invalid 携带坏帧预览让日志有"为什么"可查
-      if (ctx.sseHeadersSent()) {
-        ctx.endResponse();
-        logReq(req, 200, started, size, `${mapped.note},${(ctx.sseBytes() / 1024).toFixed(1)}KB` +
-          (result.message ? ` ${result.message.slice(0, 70)}` : ''));
-      } else {
-        logReq(req, 502, started, size, mapped.note);
-        ctx.sendError(502, mapped.message);
+      if (mapped.failedStream) {
+        if (ctx.sseHeadersSent()) {
+          ctx.endResponse();
+          logReq(req, 200, started, size, `${mapped.note},${(ctx.sseBytes() / 1024).toFixed(1)}KB` +
+            (result.message ? ` ${result.message.slice(0, 70)}` : ''));
+        } else {
+          logReq(req, 502, started, size, mapped.note);
+          ctx.sendError(502, mapped.message);
+        }
+        return;
       }
-      return;
+      return failRequest(ctx, mapped);
     }
     if (result.type === 'completion') {
       // 上游以 JSON 给了完整 completion:补成 SSE 形态交付,不丢这次生成
@@ -289,17 +290,12 @@ function createProxyService(deps) {
     }
     const mapped = mapResult(result, 'agg');
     if (mapped) {
-      if (mapped.kind === 'error') {
-        logReq(req, mapped.status, started, size, mapped.note);
-        return ctx.sendError(mapped.status, mapped.message);
-      }
-      if (mapped.kind === 'network') {
-        logReq(req, 502, started, size, mapped.note);
-        return ctx.sendError(502, mapped.message);
-      }
       // failed-stream:未以合法 [DONE] 结束即失败,不把半截回答当完整 completion 交付
-      logReq(req, 502, started, size, `${mapped.note},${chunkCount}chunks`);
-      return ctx.sendError(502, `${mapped.message},已收 ${chunkCount} 块,请重试`);
+      if (mapped.failedStream) {
+        logReq(req, 502, started, size, `${mapped.note},${chunkCount}chunks`);
+        return ctx.sendError(502, `${mapped.message},已收 ${chunkCount} 块,请重试`);
+      }
+      return failRequest(ctx, mapped);
     }
     if (result.type === 'completion') {
       // 上游直接给了完整 JSON completion:原样交付。
