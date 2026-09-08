@@ -282,10 +282,13 @@ async function requestWithRedirects(options, jar, maxRedirects = 16) {
         signal: AbortSignal.timeout(options.timeout || 20000),
       });
     } catch (e) {
-      // 网络层错误统一挂 code:容忍判定(establishWebVpnSession)按 code 不按
-      // 文案,与项目其余"错误带 code"的纪律一致
-      e.code = e.code || (e.name === 'TimeoutError' || e.name === 'AbortError' ? 'NETWORK_TIMEOUT' : 'NETWORK_ERROR');
-      throw e;
+      // 不能给 DOMException 挂 code:AbortSignal.timeout 抛的 TimeoutError 自带
+      // 只读数值访问器 code(=23),strict 下赋值抛 TypeError,会吞掉原错误。
+      // 统一包成带 code 的 Error,原错误留在 cause
+      const timeout = e.name === 'TimeoutError' || e.name === 'AbortError';
+      const err = new Error(`网络请求失败: ${e.message}`, { cause: e });
+      err.code = timeout ? 'NETWORK_TIMEOUT' : 'NETWORK_ERROR';
+      throw err;
     }
     jar.absorb(url, res.headers.getSetCookie());
 
