@@ -3,12 +3,15 @@
 // 零第三方依赖。非秘密字段(学号/指纹/有效期)留在 JSON 元数据文件——钥匙串
 // 是秘密的存储主体,这与 Windows"密文+元数据同文件"形态不同但语义等价。
 //
-// 纪律与 Windows 侧一致:
-//   - 秘密不进 argv(不进进程列表/审计日志):写入走 security 的 stdin 交互模式
+// 纪律与 Windows 侧一致的部分:
 //   - 读路径优雅降级:条目不存在/钥匙串锁定时按"无数据"返回 null,不抛——
 //     否则 watch 守护会在第一个 readToken 就崩
 //   - -T /usr/bin/security:允许 security 自身免提示读取(钥匙串锁定时除外),
 //     后台守护无人值守续期依赖这一点
+// 与 Windows 侧不同的取舍:秘密经 argv 送入 security。macOS 没有 stdin 通道
+// 可喂它,`-i` 交互模式的引号转义语义不可依赖(CI 实测失败);execFileSync
+// 不经 shell、argv 由 execve 原样传递,无解析歧义。代价是秘密在本进程
+// argv 中存在毫秒级窗口,仅同用户可见——如实记录,不假装等价于 stdin。
 
 'use strict';
 
@@ -22,15 +25,19 @@ const SERVICE = 'madmodel-proxy';
 const ACCOUNT_PASSWORD = 'password';
 const ACCOUNT_TOKEN = 'token';
 
-// security 交互解析器按双引号分词,只需转义反斜杠与双引号(密码来自 readline
-// 按行读取,不含换行)
 function keychainWrite(account, secret) {
-  const esc = String(secret).replace(/([\\"])/g, '\\$1');
-  const cmd = `add-generic-password -U -s "${SERVICE}" -a "${account}" -w "${esc}" -T /usr/bin/security`;
-  execFileSync('security', ['-i'], {
-    input: cmd + '\n',
-    stdio: ['pipe', 'ignore', 'ignore'],
-  });
+  const args = ['add-generic-password', '-U',
+    '-s', SERVICE, '-a', account,
+    '-w', String(secret),
+    '-T', '/usr/bin/security'];
+  try {
+    execFileSync('security', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+  } catch (e) {
+    // stderr 带上来:钥匙串问题(lockdown/权限/参数)在 CI 与真机上都要能自诊断;
+    // security 的报错文案不回显 -w 的值
+    const detail = e.stderr ? e.stderr.toString().trim() : e.message;
+    throw new Error(`钥匙串写入失败: ${detail}`);
+  }
 }
 
 // 条目不存在/钥匙串锁定:security 非零退出,按无数据处理
