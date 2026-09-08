@@ -46,7 +46,7 @@ madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件�
 ## 边界
 
 - **Windows 专用**。凭据存储依赖 DPAPI，Linux/macOS 跑不了代理与续期
-- **清华 madmodel 专用**。登录链实测于 2026-09，学校改版即失效（失效会报明确错误）
+- **清华 madmodel 专用**。
 - **本地无鉴权**。只监听 `127.0.0.1` + Host 白名单，客户端 API key 填任意值
 - **只有 chat completions**。无 embeddings、图像、音频；单模型，任意模型名都会被重写为 `DeepSeek-V4-Flash`；`logprobs`/`n>1` 被剥离（上游拒绝）
 
