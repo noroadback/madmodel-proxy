@@ -7,7 +7,7 @@
 
 function translateUpstreamError(bodyObj, raw, status) {
   if (status === 404) {
-    return { http: 502, message: '上游返回 404:可能被 WAF 对提示词内容的误拦截(详见 README"已知兼容性问题"),也可能是端点变更' };
+    return { http: 502, message: '上游返回 404:端点可能已变更' };
   }
   const detail = bodyObj && (bodyObj.errorMessage || bodyObj.message || bodyObj.error?.message ||
     bodyObj.detail || (typeof bodyObj.error === 'string' ? bodyObj.error : ''));

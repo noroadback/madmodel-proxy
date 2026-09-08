@@ -105,9 +105,6 @@ function createUpstreamClient(config) {
       }, upstreamHeaderTimeout);
 
       (async () => {
-        // 请求体明文直发。历史上的 WAF(其 SQL 注入特征规则会误拦含 "(set "
-        // 字面量的明文,agent 工具系统提示词常见)已由上游于 2026-09-08 移除,
-        // 此前的 gzip 编码规避随之删除;若 WAF 回归,revert 本提交即可恢复
         const reqHeaders = {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
