@@ -6,12 +6,11 @@
 
 前置是 Windows、macOS 或 Linux，Node.js ≥ 18.14，以及一个清华统一认证账号。
 
-```bat
-cd %USERPROFILE%
+```sh
 git clone https://github.com/noroadback/madmodel-proxy.git
 cd madmodel-proxy
 
-rem 首次配置:输入学号+密码(首次含二次认证,只需一次)
+# 首次配置:输入学号+密码(首次含二次认证,只需一次)
 node refresh-token.js login
 ```
 
@@ -41,7 +40,7 @@ madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件�
 - **零依赖**。纯 Node 原生，clone 即用，无 `npm install`
 - **token 全自动**。到期前 30 分钟自动走完整登录链（含二次认证、可信设备登记），热加载免重启
 - **静态加密存储**。Windows 用 DPAPI、macOS 用登录钥匙串、Linux 用机器绑定加密
-- **单窗口运行**。start.cmd 同窗拉起守护与代理，Ctrl+C 或关窗全停
+- **单窗口运行**。Windows 双击 start.cmd、macOS / Linux 用 `npm start`，同窗拉起守护与代理，Ctrl+C 或关窗全停
 
 ## 边界
 
@@ -52,7 +51,7 @@ madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件�
 
 | 现象 | 处理 |
 |---|---|
-| 请求 401 `token 已过期` | watch 守护没在跑或续期失败。`node refresh-token.js status` 一屏看清；没跑就开 start.cmd |
+| 请求 401 `token 已过期` | watch 守护没在跑或续期失败。`node refresh-token.js status` 一屏看清；没跑就开 start.cmd 或 `npm start` |
 | 请求 503 | 本地无 token。没做过 login，或 `[watch]` 日志有报错 |
 | 启动报 `端口 8080 已被占用` | 代理已在运行，直接使用；需另开实例时用 `PROXY_PORT` |
 | 上游 401/502/429 | 上游侧问题，通常自愈；持续出现提 issue 附代理日志 |
