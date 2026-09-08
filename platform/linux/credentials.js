@@ -56,5 +56,4 @@ function unseal(sealed) {
 module.exports = createFileCredentialStore({
   protect: seal,
   unprotect: unseal,
-  readFailureHint: '已换机器/用户或文件损坏',
 });

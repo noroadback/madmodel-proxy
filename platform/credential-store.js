@@ -18,7 +18,7 @@ const { generateFingerprint } = require('../madmodel-auth');
 const { atomicWrite } = require('./file-store');
 const { TOKEN_FILE, CREDS_FILE } = require('./paths');
 
-module.exports = function createFileCredentialStore({ protect, unprotect, readFailureHint }) {
+module.exports = function createFileCredentialStore({ protect, unprotect }) {
 
   function tryUnprotect(cipher) {
     try { return unprotect(cipher) || null; } catch (e) { return null; }
@@ -63,8 +63,9 @@ module.exports = function createFileCredentialStore({ protect, unprotect, readFa
         updatedAt: raw.updatedAt,
       };
     } catch (e) {
-      // 固定文案:e.message 可能携带密文片段,不该进日志
-      console.error(`凭据读取失败(可能${readFailureHint}),可重新运行 login 配置`);
+      // 固定文案:能到这里的只剩 JSON 解析失败与 fs 错误(解密失败由
+      // tryUnprotect 静默降级);e.message 可能携带文件内容,不该进日志
+      console.error('凭据读取失败(文件损坏或不可读),可重新运行 login 配置');
       return null;
     }
   }

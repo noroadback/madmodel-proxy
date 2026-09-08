@@ -45,5 +45,4 @@ function dpapiUnprotect(cipherB64) {
 module.exports = createFileCredentialStore({
   protect: dpapiProtect,
   unprotect: dpapiUnprotect,
-  readFailureHint: '已换 Windows 账户或文件损坏',
 });
