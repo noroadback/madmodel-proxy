@@ -61,14 +61,17 @@ function launch(tag, script, args) {
           console.log('\n全部子进程均已停止自动重启,窗口可关闭;修复后重开 start.cmd。');
           process.exit(1);
         }
-        return;
+      } else {
+        console.log(`[${tag}] === 子进程崩溃(code ${code}),5 秒后自动重启(${streak}/3)===`);
       }
-      console.log(`[${tag}] === 子进程崩溃(code ${code}),5 秒后自动重启(${streak}/3)===`);
     } else {
       crashStreaks.set(tag, 0);
       console.log(`[${tag}] === 子进程退出(code ${code},运行 ${Math.round(ranMs / 1000)}s),5 秒后自动重启 ===`);
     }
-    setTimeout(() => { if (!shuttingDown) launch(tag, script, args); }, 5000);
+    // intentional(如 watch 撞单实例锁)与已放弃的不排重启,其余 5 秒后重启
+    if (!intentional && !givenUp.has(tag)) {
+      setTimeout(() => { if (!shuttingDown) launch(tag, script, args); }, 5000);
+    }
     // 没有存活/待重启的子进程时收尾(有定时器待重启则不退)
     if (!children.size && (intentional || givenUp.has(tag))) {
       console.log('\n没有存活/待重启的子进程,窗口可关闭;需要时重开 start.cmd。');

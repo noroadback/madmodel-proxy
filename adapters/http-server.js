@@ -290,7 +290,7 @@ function createHttpServer({ config, service }) {
       sseBytes: () => passthroughBytes,
       async writeSseChunk(obj) {
         ctx.ensureSseHeaders();
-        ctx.writeSseLine(`data: ${JSON.stringify(obj)}\n\n`);
+        return ctx.writeSseLine(`data: ${JSON.stringify(obj)}\n\n`);
       },
       writeSseLine(line) {
         passthroughBytes += line.length;
