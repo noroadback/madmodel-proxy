@@ -284,7 +284,10 @@ async function requestWithRedirects(options, jar, maxRedirects = 16) {
     } catch (e) {
       // 不能给 DOMException 挂 code:AbortSignal.timeout 抛的 TimeoutError 自带
       // 只读数值访问器 code(=23),strict 下赋值抛 TypeError,会吞掉原错误。
-      // 统一包成带 code 的 Error,原错误留在 cause
+      // 统一包成带 code 的 Error,原错误留在 cause。
+      // AbortError 暂与超时同档:当前 signal 只来自 AbortSignal.timeout(),没有
+      // 外部取消来源;若将来引入外部中止(如 Ctrl+C 打断登录链),必须拆开,
+      // 否则用户主动取消会被当成网络超时"容忍并重试"
       const timeout = e.name === 'TimeoutError' || e.name === 'AbortError';
       const err = new Error(`网络请求失败: ${e.message}`, { cause: e });
       err.code = timeout ? 'NETWORK_TIMEOUT' : 'NETWORK_ERROR';
