@@ -25,7 +25,6 @@
 
 'use strict';
 
-const zlib = require('zlib');
 const { SseParser } = require('./stream-parser');
 
 // 限量读:错误页/直答异常膨胀时及时放弃,不无限缓冲(超限抛 UPSTREAM_BODY_LIMIT)
@@ -50,7 +49,7 @@ async function readLimited(reader, limit) {
 
 function createUpstreamClient(config) {
   const {
-    upstream, gzipBody,
+    upstream,
     streamIdleTimeout, streamTotalTimeout, upstreamHeaderTimeout,
     upstreamJsonBodyLimit, upstreamSseTotalLimit, sseLineLimit,
   } = config;
@@ -106,21 +105,19 @@ function createUpstreamClient(config) {
       }, upstreamHeaderTimeout);
 
       (async () => {
-        // 请求体 gzip:上游 WAF 的 SQL 注入特征规则会误拦含字面量 "(set " 的明文
-        // 请求体(agent 工具的系统提示词常见),对 gzip 编码的请求体则不再触发。
-        // gzipBody=false 可关闭;误拦截的正路是向平台反馈误报。见 README
+        // 请求体明文直发。历史上的 WAF(其 SQL 注入特征规则会误拦含 "(set "
+        // 字面量的明文,agent 工具系统提示词常见)已由上游于 2026-09-08 移除,
+        // 此前的 gzip 编码规避随之删除;若 WAF 回归,revert 本提交即可恢复
         const reqHeaders = {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
           Accept: 'text/event-stream',
         };
-        const reqBody = JSON.stringify(payload);
-        if (gzipBody) reqHeaders['Content-Encoding'] = 'gzip';
 
         const up = await fetch(upstream, {
           method: 'POST',
           headers: reqHeaders,
-          body: gzipBody ? zlib.gzipSync(Buffer.from(reqBody, 'utf8')) : Buffer.from(reqBody, 'utf8'),
+          body: Buffer.from(JSON.stringify(payload), 'utf8'),
           redirect: 'manual',
           signal: lifecycle.signal,
         });

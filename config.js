@@ -50,7 +50,6 @@ module.exports = Object.freeze({
   sseLineLimit: 1024 * 1024,       // 尾部未完成行的字节上限(防病态流内存膨胀)
 
   // 请求编码与诊断
-  gzipBody: process.env.PROXY_NO_GZIP !== '1',  // WAF 误拦规避,见 README
   dumpFailed: process.env.DUMP_FAILED === '1',  // 失败请求体落盘(默认关,隐私)
 
   // watch 续期调度
