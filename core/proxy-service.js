@@ -12,7 +12,7 @@
 'use strict';
 
 const { normalizePayload, parseJsonBody } = require('./payload');
-const { translateUpstreamError, isFailedStream, describeFailedStream } = require('./errors');
+const { translateUpstreamError, describeFailedStream } = require('./errors');
 const { createAggregator } = require('./completion-aggregator');
 
 // 日志时间戳。固定 HH:MM:SS 而非 toLocaleTimeString:后者随机器 locale 变形
@@ -55,7 +55,7 @@ function createProxyService(deps) {
 
   // token 有效性:ok = 可用(附 token 与剩余毫秒);no-token / token-expired
   // 由 adapter 映射为 503/401
-  function authenticateRequest(ctx) {
+  function authenticateRequest() {
     const ts = tokenState();
     if (ts.code === 'no-token') {
       return { error: { status: 503, message: '本地无 token。请先在本项目目录运行: node refresh-token.js login', note: 'no-token' } };
@@ -118,7 +118,7 @@ function createProxyService(deps) {
 
   async function handleRequest(ctx) {
     // ---- authenticate(顺序与既有行为一致:empty-body 之后、JSON 解析之前)
-    const auth = authenticateRequest(ctx);
+    const auth = authenticateRequest();
     if (auth.error) {
       logReq(ctx.req, auth.error.status, ctx.started, ctx.size, auth.error.note);
       return ctx.sendError(auth.error.status, auth.error.message, auth.error.type);

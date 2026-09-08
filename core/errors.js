@@ -30,10 +30,6 @@ function translateUpstreamError(bodyObj, raw, status) {
 
 // "流未以合法 [DONE] 结束"的形态(截断 / 坏帧 / 总时限):流式与非流式只在
 // note 前缀上不同,判定与措辞不各写一份
-function isFailedStream(result) {
-  return result.type === 'protocol-error' || (result.type === 'timeout' && result.phase === 'total');
-}
-
 function describeFailedStream(result, notePrefix, config) {
   if (result.type === 'protocol-error' && result.reason === 'truncated') {
     return { note: `${notePrefix}-truncated`, message: '上游流被截断(未见终止标记 [DONE])' };
@@ -47,4 +43,4 @@ function describeFailedStream(result, notePrefix, config) {
   };
 }
 
-module.exports = { translateUpstreamError, isFailedStream, describeFailedStream };
+module.exports = { translateUpstreamError, describeFailedStream };

@@ -59,7 +59,6 @@ async function promptCredentials() {
     // stdin,必须在 readline 上按行读(绕开它的裸监听拿不到被缓冲的数据,
     // 且 rl.close 在管道模式会直接结束输入流——曾导致管道 login 挂死)
     password = (await ask('统一认证密码(输入不显示): ')).trim();
-    rl.close();
   }
   rl.close(); // 凭据都拿到后再释放 stdin
   if (!password) { console.error('密码不能为空'); process.exit(1); }
