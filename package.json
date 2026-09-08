@@ -1,6 +1,6 @@
 {
   "name": "madmodel-proxy",
-  "version": "1.4.4",
+  "version": "1.4.5",
   "private": true,
   "license": "MIT",
   "description": "madmodel 本地 OpenAI 兼容代理 + 清华统一认证 token 自动续期(GitHub 源码分发,不发布到 npm)",
