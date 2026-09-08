@@ -1,6 +1,6 @@
 // core/payload.js
 // 请求参数归一化(纯函数,只修改传入 payload,不读环境变量、不做 I/O)。
-// 行为契约见 test-payload.js 与 README"参数归一化"一节。
+// 行为契约见 README"边界"与 CHANGELOG 1.1.0"参数归一化"。
 
 'use strict';
 

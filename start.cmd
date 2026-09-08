@@ -1,7 +1,7 @@
 @echo off
 rem madmodel launcher + status: one entry point.
-rem Service not running -> starts it (single window: watch daemon + proxy).
-rem Service already running -> shows a one-screen health summary instead
+rem Proxy not running -> starts it (single window: watch daemon + proxy).
+rem Proxy already running -> shows a one-screen health summary instead
 rem   of duplicate-starting (same as refresh-token.js status).
 rem Honors PROXY_PORT if set (defaults to 8080).
 rem First run offers a desktop shortcut (single keypress, answer

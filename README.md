@@ -15,7 +15,7 @@ rem 首次配置:输入学号+密码(首次含二次认证,只需一次)
 node refresh-token.js login
 ```
 
-双击 **start.cmd** 启动，窗口保持开启。首次启动会问是否创建桌面快捷方式。服务已在运行时再次运行 start.cmd 会显示状态，不会重复启动。
+双击 **start.cmd** 启动，窗口保持开启。首次启动会问是否创建桌面快捷方式。代理已在运行时再次运行 start.cmd 会显示状态，不会重复启动。
 
 在客户端（智能体、OpenAI SDK）里填以下值。
 
@@ -55,6 +55,7 @@ madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件�
 | 现象 | 处理 |
 |---|---|
 | 请求 401 `token 已过期` | watch 守护没在跑或续期失败。`node refresh-token.js status` 一屏看清；没跑就开 start.cmd |
+| 请求 503 | 本地无 token。没做过 login，或 `[watch]` 日志有报错 |
 | 启动报 `端口 8080 已被占用` | 代理已在运行，直接使用；需另开实例时用 `PROXY_PORT` |
 | 上游 401/502/429 | 上游侧问题，通常自愈；持续出现提 issue 附代理日志 |
 | token 长期无人续期 | 改过密码或二次认证过期，重跑一次 `node refresh-token.js login` |
@@ -66,6 +67,8 @@ madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件�
 | `PROXY_PORT` | `8080` | 监听端口 |
 | `PROXY_NO_GZIP` | 关 | `=1` 关闭请求体 gzip 编码（上游 WAF 误报规避） |
 | `PROXY_REFRESH_AHEAD_MS` | 1800000 | 提前续期窗口（毫秒） |
+| `PROXY_NO_TOKEN_WAIT_MS` | 60000 | watch 守护未配置凭据时的重查间隔（毫秒） |
+| `PROXY_MAX_SLEEP_MS` | 3600000 | watch 守护单次等待上限（毫秒），到点醒来重读 token 状态 |
 | `PROXY_STREAM_TOTAL_MS` | 1200000 | 单次流式请求总时限（毫秒） |
 | `DUMP_FAILED` | 关 | `=1` 时被上游拒绝的请求体落盘，含完整对话（隐私），排障后删 |
 

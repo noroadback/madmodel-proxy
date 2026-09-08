@@ -9,7 +9,7 @@
 | 统一认证密码 | DPAPI 加密，`%USERPROFILE%\.dsh-madmodel\creds.json` | 仅以 SM2 加密报文发往 `id.tsinghua.edu.cn` | 不写日志、不进命令行、不经任何第三方 |
 | madmodel token | DPAPI 加密，`token.json` | 仅作为 Bearer 头发往 `madmodel.cs.tsinghua.edu.cn` | 同上 |
 | 对话内容 | 不落盘（默认） | 经本代理发往 madmodel 上游 | `DUMP_FAILED=1` 时失败请求会落盘到状态目录，该文件含完整对话，排障后应删除 |
-| 设备指纹 | 随凭据文件存储 | 发往学校登录服务用于可信设备登记 | 32 位随机 hex，每次安装重新生成 |
+| 设备指纹 | 随凭据文件存储 | 发往学校登录服务用于可信设备登记 | 32 个十六进制字符（16 字节），每次安装重新生成 |
 
 ## 明确不会发生的事
 

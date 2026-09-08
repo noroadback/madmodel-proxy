@@ -11,12 +11,14 @@
 
 const crypto = require('crypto');
 
-// sm2.js 的熵池在模块加载时读取 window.crypto 播种(实测:播种期 Math.random 调用
-// 0 次)。无 shim 时它不会退化为 Math.random,而是只剩两次 Date.now() 写入——
-// RC4 池仅约 1000 个候选,SM2 私钥可被知道生成时刻(秒级)的攻击者枚举,
-// 密文(统一认证密码)因此可解。故此处强制断言生效的 crypto 是 CSPRNG,fail closed:
-// 既覆盖"无 window"(注入 shim),也覆盖"已有 window 但其 crypto 不可用"(直接拒绝,
-// 不允许静默跳过 shim)。
+// sm2.js(jsbn 系 RNG)的熵池播种(vendored 源码核实):window.crypto 分支只把
+// 32 字节 CSPRNG 写入 256 字节池的开头,其余 224 字节无条件由 Math.random 补齐,
+// 播种与取字节过程中另有少量 Date.now() 字节 XOR 进池首,随后整池过 RC4 密钥编排。
+// CSPRNG 的 32 字节(256 bit)真实熵意味着:即使 Math.random 输出全被还原,私钥仍
+// 有 256 bit 不可预测。无 shim 时整池只剩 Math.random,熵完全依赖一个可被进程内
+// 观察还原的非密码学随机源,密文(统一认证密码)可解。故此处强制断言生效的 crypto
+// 是 CSPRNG,fail closed:既覆盖"无 window"(注入 shim),也覆盖"已有 window 但其
+// crypto 不可用"(直接拒绝,不允许静默跳过 shim)。
 const nodeCrypto = crypto.webcrypto;
 if (!nodeCrypto || typeof nodeCrypto.getRandomValues !== 'function') {
   throw new Error('当前 Node.js 不提供 WebCrypto CSPRNG,拒绝加载熵池无法接入 CSPRNG 的 SM2 实现');
@@ -702,7 +704,7 @@ function jwtExpiresAt(token) {
   return Date.now() + 5 * 3600 * 1000;
 }
 
-// 复刻 learnX 的指纹形态:32 位随机 hex
+// 复刻 learnX 的指纹形态:32 个十六进制字符(16 字节)
 function generateFingerprint() {
   return crypto.randomBytes(16).toString('hex');
 }
@@ -714,8 +716,8 @@ module.exports = {
   generateFingerprint,
   AuthError,
   requestWithRedirects,
-  // 以下为纯逻辑,导出供 test-auth.js 离线测试(认证链无法端到端测试,
-  // 但这些判定函数是它出错概率最高的地方)
+  // 以下为认证链中出错概率最高的纯判定函数(响应体解码/URL 解析/重定向白名单)。
+  // 认证链无法端到端离线验证,单独导出便于本地复现与审查
   decodeBody,
   resolveUrl,
   isAllowedRedirect,

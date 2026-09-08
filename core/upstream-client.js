@@ -16,7 +16,7 @@
 // onChunk(obj) 收每个 SSE data JSON,可为 async(背压等待期间不再读上游);
 // onOpen(isSse) 在上游响应头到达时调用一次。
 //
-// === 异常契约(调用方依赖,测试锁定) ===
+// === 异常契约(调用方依赖) ===
 // request() 的返回 promise **只 resolve 结果对象,不 reject**(内部唯一的
 // 主错误通道是 .catch → 按结果形态带回)。mock 或未来实现若违反此契约
 // 直接 reject,调用方(proxy-service.handleRequest)的 try/finally 仍会释放

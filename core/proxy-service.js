@@ -154,7 +154,7 @@ function createProxyService(deps) {
     }
 
     // ---- 上游调用(64 以内不设业务层限流)。
-    // === 异常契约(测试锁定,见 test-inflight.js) ===
+    // === 异常契约 ===
     // 真实 upstream-client.request() 只 resolve 结果对象、不 reject(其文件头
     // 契约);若 mock/未来实现意外 reject,本 try/finally 仍保证 inflight 释放,
     // 异常向上传播到 http-server 的 .catch 兜底:响应未发出时转 500
