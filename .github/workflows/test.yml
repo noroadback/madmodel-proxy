@@ -22,3 +22,20 @@ jobs:
       - name: Syntax check
         run: |
           node -e "const fs=require('fs'),path=require('path');const files=[];const walk=d=>{for(const e of fs.readdirSync(d,{withFileTypes:true})){if(e.isDirectory()){if(e.name!=='node_modules')walk(path.join(d,e.name))}else if(e.name.endsWith('.js'))files.push(path.join(d,e.name))}};walk('.');for(const f of files)require('child_process').execFileSync(process.execPath,['--check',f],{stdio:'inherit'})"
+
+  platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      # 跨平台"启动+存储"冒烟(临时状态目录,不访问学校服务、不消耗配额):
+      # 验证各平台凭据存储原语(Windows DPAPI / macOS 钥匙串 / Linux 机器绑定
+      # 加密)的写入-读回往返、proxy 无 token 启动探活、watch 守护调度循环
+      - name: Platform smoke
+        run: node scripts/platform-smoke.js
