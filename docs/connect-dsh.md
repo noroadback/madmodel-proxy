@@ -2,7 +2,7 @@
 
 从零到 dsh 能用上 madmodel，大约 5 分钟，已在 Windows 11 + Node.js 24 + dsh 上实测。其他 OpenAI 兼容客户端的配置方式相同。
 
-前置三样。Windows 10/11（凭据存储用 DPAPI，暂不支持 macOS/Linux）；Node.js 18.14 以上（终端跑 `node -v` 确认，版本太低程序会直接报错）；一个清华统一认证账号。本工具零第三方依赖，clone 之后不用 `npm install`。
+前置三样。Windows、macOS 或 Linux；Node.js 18.14 以上（终端跑 `node -v` 确认，版本太低程序会直接报错）；一个清华统一认证账号。本工具零第三方依赖，clone 之后不用 `npm install`。
 
 ## 第 1 步：保存凭据
 
@@ -16,11 +16,11 @@ node refresh-token.js login
 
 成功的标志是形如 `✅ token 已获取,有效期至 …` 的一行。
 
-此时 `%USERPROFILE%\.dsh-madmodel\` 下生成了两个文件。`creds.json` 存学号、密码和设备指纹，`token.json` 存 madmodel API token，都是 DPAPI 加密，只有当前 Windows 账户解得开。密码只以两种形态存在，本机 DPAPI 密文，以及发往 `id.tsinghua.edu.cn` 的 SM2 加密报文（学校登录协议本身的要求），不经任何第三方，不写日志。
+此时状态目录下生成了两个文件（Windows 在 `%USERPROFILE%\.dsh-madmodel\`，macOS / Linux 在 `~/.dsh-madmodel/`）。`creds.json` 存学号、密码和设备指纹，`token.json` 存 madmodel API token，都是静态加密：Windows 用 DPAPI，macOS 存登录钥匙串，Linux 用机器绑定加密（文件离开这台机器即不可解）。密码只以两种形态存在，本机密文，以及发往 `id.tsinghua.edu.cn` 的 SM2 加密报文（学校登录协议本身的要求），不经任何第三方，不写日志。
 
 ## 第 2 步：启动
 
-双击 **`start.cmd`**。首次启动会问是否创建桌面快捷方式，之后从桌面启动即可。它以单窗口拉起续期守护和本地端点，日志用 `[watch]` 和 `[代理]` 前缀区分，Ctrl+C 或关窗全部停止；代理在运行时再次运行 start.cmd 会显示状态，不会启动第二个实例。
+Windows 双击 **`start.cmd`**（首次启动会问是否创建桌面快捷方式，之后从桌面启动即可），macOS / Linux 运行 `npm start`。它以单窗口拉起续期守护和本地端点，日志用 `[watch]` 和 `[代理]` 前缀区分，Ctrl+C 或关窗全部停止；代理在运行时再次运行 start.cmd 会显示状态，不会启动第二个实例。
 
 启动成功的输出。
 
@@ -32,6 +32,8 @@ node refresh-token.js login
 [代理] token 文件: %USERPROFILE%\.dsh-madmodel\token.json(热加载,续期免重启)
 [代理] 当前 token 剩余 272 分钟
 ```
+
+macOS / Linux 上 `token 文件` 一行显示为 `~/.dsh-madmodel/token.json`，其余相同。
 
 ## 第 3 步：配置 dsh
 
@@ -49,11 +51,11 @@ node refresh-token.js login
 
 ## 日常
 
-- 开机后从桌面快捷方式（或 start.cmd）启动，窗口保持开启
+- 开机后启动（Windows 用桌面快捷方式或 start.cmd，macOS / Linux 用 `npm start`），窗口保持开启
 - token 到期前 30 分钟自动续期，代理热加载新 token
 - 代理在运行时重复运行 start.cmd 会显示状态，不会启动第二个实例
 - 改了统一认证密码的话，守护连续 3 次登录失败会自动退出并提示，重跑一遍第 1 步（`login`）即可，其他配置不受影响
-- 找不到项目文件夹时，右键桌面快捷方式选"打开文件所在位置"；仓库丢失可重新 clone，状态目录在 `%USERPROFILE%\.dsh-madmodel\`，与仓库分离，登录状态不丢失
+- 找不到项目文件夹时，右键桌面快捷方式选"打开文件所在位置"；仓库丢失可重新 clone，状态目录（Windows `%USERPROFILE%\.dsh-madmodel\`，macOS / Linux `~/.dsh-madmodel/`）与仓库分离，登录状态不丢失
 
 ## 故障排查
 

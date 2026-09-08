@@ -4,7 +4,7 @@
 
 ## 使用
 
-前置是 Windows 10/11、Node.js ≥ 18.14 和一个清华统一认证账号。
+前置是 Windows、macOS 或 Linux，Node.js ≥ 18.14，以及一个清华统一认证账号。
 
 ```bat
 cd %USERPROFILE%
@@ -15,7 +15,7 @@ rem 首次配置:输入学号+密码(首次含二次认证,只需一次)
 node refresh-token.js login
 ```
 
-双击 **start.cmd** 启动，窗口保持开启。首次启动会问是否创建桌面快捷方式。代理已在运行时再次运行 start.cmd 会显示状态，不会重复启动。
+Windows 双击 **start.cmd** 启动（首次会问是否创建桌面快捷方式；代理已在运行时再次运行会显示状态，不会重复启动），macOS / Linux 运行 `npm start`。窗口保持开启。
 
 在客户端（智能体、OpenAI SDK）里填以下值。
 
@@ -40,12 +40,11 @@ madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件�
 
 - **零依赖**。纯 Node 原生，clone 即用，无 `npm install`
 - **token 全自动**。到期前 30 分钟自动走完整登录链（含二次认证、可信设备登记），热加载免重启
-- **DPAPI 加密**。密码与 token 静态加密存储，仅当前 Windows 账户可解
+- **静态加密存储**。Windows 用 DPAPI、macOS 用登录钥匙串、Linux 用机器绑定加密
 - **单窗口运行**。start.cmd 同窗拉起守护与代理，Ctrl+C 或关窗全停
 
 ## 边界
 
-- **Windows 专用**。凭据存储依赖 DPAPI，Linux/macOS 跑不了代理与续期
 - **本地无鉴权**。只监听 `127.0.0.1` + Host 白名单，客户端 API key 填任意值
 - **只有 chat completions**。无 embeddings、图像、音频；单模型，任意模型名都会被重写为 `DeepSeek-V4-Flash`；`logprobs`/`n>1` 被剥离（上游拒绝）
 
