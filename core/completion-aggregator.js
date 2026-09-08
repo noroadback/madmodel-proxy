@@ -4,9 +4,9 @@
 
 'use strict';
 
-function createAggregator() {
+function createAggregator(model = '') {
   return {
-    id: '', model: 'DeepSeek-V4-Flash',
+    id: '', model,
     content: '', reasoning: '',
     toolCalls: {}, // index → {id, type, function:{name, arguments}}
     finish: null, usage: null, created: 0,

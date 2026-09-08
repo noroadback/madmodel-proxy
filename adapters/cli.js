@@ -84,7 +84,7 @@ async function cmdOnce() {
 
 // 一屏状态:代理/token/watch/key 四问四答。全部只读,可随时运行。
 async function cmdStatus() {
-  // 1) 代理:/v1/models 在鉴权之前、无需 key;返回 DeepSeek-V4-Flash
+  // 1) 代理:/v1/models 在鉴权之前、无需 key;返回配置的模型列表
   //    即确认是本代理在监听(而非端口被其他程序占用)
   let proxyUp = false;
   try {

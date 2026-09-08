@@ -36,7 +36,7 @@ async function main() {
 
   // 1) 小请求(流式):应完整以 [DONE] 结束,无内嵌错误
   let r = await chat({
-    model: 'DeepSeek-V4-Flash', stream: true, max_tokens: 300,
+    model: config.models[0], stream: true, max_tokens: 300,
     messages: [{ role: 'user', content: '用一句话回答:1+1 等于几?' }],
   });
   check(r.status === 200 && r.text.trimEnd().endsWith('data: [DONE]') && !r.text.includes('errorMessage'),
@@ -45,7 +45,7 @@ async function main() {
 
   // 2) 非流式短请求:聚合路径完整、usage 注入生效(真实 token 计数,非全零)
   r = await chat({
-    model: 'DeepSeek-V4-Flash', stream: false, max_tokens: 300,
+    model: config.models[0], stream: false, max_tokens: 300,
     messages: [{ role: 'user', content: '回答:ok' }],
   });
   let usageOk = false;

@@ -89,7 +89,7 @@ function createProxyService(deps) {
     } else {
       payload.stream_options.include_usage = payload.stream_options.include_usage === false ? false : true;
     }
-    const normalized = normalizePayload(payload);
+    const normalized = normalizePayload(payload, config.model);
     return { payload, clientWantsStream, normNote: normalized.length ? ` norm[${normalized.join(' ')}]` : '' };
   }
 
@@ -253,7 +253,7 @@ function createProxyService(deps) {
   // ---- 非流式:聚合 SSE ----
   async function aggregateResponse(ctx, payload, token, extraHeaders, normNote, ac) {
     const { req, started, size } = ctx;
-    const agg = createAggregator();
+    const agg = createAggregator(config.model);
     let chunkCount = 0;
     let timedOut = false;
     const timer = setTimeout(() => {

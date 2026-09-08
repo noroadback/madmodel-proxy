@@ -86,6 +86,7 @@ async function main() {
   process.env.MADMODEL_STATE_DIR = stateDir;
 
   const credentials = require('../platform/credentials');
+  const cfg = require('../config');
 
   // ---- 1) 凭据与 token 存储往返(非 ASCII 秘密顺带验证编码路径) ----
   const PW = 'pass-马Φ"quote\\slash';
@@ -117,7 +118,7 @@ async function main() {
       try {
         const r = await fetch(`http://127.0.0.1:${port}/v1/models`);
         const j = await r.json();
-        if (Array.isArray(j.data) && j.data.some(m => m.id === 'DeepSeek-V4-Flash')) break;
+        if (Array.isArray(j.data) && j.data.some(m => m.id === cfg.models[0])) break;
         throw new Error('/v1/models 应答缺模型 id');
       } catch (e) {
         if (Date.now() > deadline) throw new Error('代理 20s 内未应答 /v1/models');

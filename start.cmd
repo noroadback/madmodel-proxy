@@ -27,9 +27,10 @@ if not exist "%USERPROFILE%\.dsh-madmodel\shortcut-created" (
 
 rem If OUR proxy already answers on the port, do not duplicate-start:
 rem show a health summary instead (proxy / token / watch / credentials).
-rem Probes GET /v1/models and looks for our model id: another program merely
+rem Probes GET /v1/models and looks for a DeepSeek model id (prefix match,
+rem survives upstream model renames): another program merely
 rem listening on the port would be misreported as "already running".
-node -e "fetch('http://127.0.0.1:%MADPORT%/v1/models').then(r=>r.json()).then(j=>{process.exit(j&&Array.isArray(j.data)&&j.data.some(m=>m.id==='DeepSeek-V4-Flash')?0:1)}).catch(()=>process.exit(1))" >nul 2>&1
+node -e "fetch('http://127.0.0.1:%MADPORT%/v1/models').then(r=>r.json()).then(j=>{process.exit(j&&Array.isArray(j.data)&&j.data.some(m=>String(m.id).startsWith('DeepSeek'))?0:1)}).catch(()=>process.exit(1))" >nul 2>&1
 if %errorlevel%==0 (
   echo madmodel proxy is already running on port %MADPORT% - health check:
   node "%~dp0refresh-token.js" status

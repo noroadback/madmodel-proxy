@@ -23,8 +23,8 @@ const PORT = numberEnv('PROXY_PORT', 8080);
 module.exports = Object.freeze({
   host: '127.0.0.1',
   port: PORT,
-  model: 'DeepSeek-V4-Flash',
-  models: Object.freeze(['DeepSeek-V4-Flash']),
+  model: 'DeepSeek-V4-Flash-0731',
+  models: Object.freeze(['DeepSeek-V4-Flash-0731']),
   // PROXY_UPSTREAM / PROXY_TOKEN_FILE:测试注入用(端到端测试指向本地假上游)
   upstream: process.env.PROXY_UPSTREAM || 'https://madmodel.cs.tsinghua.edu.cn/v1/chat/completions',
   tokenFile: process.env.PROXY_TOKEN_FILE || paths.TOKEN_FILE,

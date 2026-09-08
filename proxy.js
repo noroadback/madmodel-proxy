@@ -1,5 +1,5 @@
 // proxy.js
-// madmodel DeepSeek-V4-Flash 本地反向代理(OpenAI 兼容)的启动入口。
+// madmodel 本地 OpenAI 兼容端点的启动入口。
 // 监听 127.0.0.1:8080,供 dsh 等标准 OpenAI 客户端使用。
 //
 // 职责(按已验证的 API 规格书):

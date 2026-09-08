@@ -24,11 +24,13 @@ function parseJsonBody(rawBody) {
   return payload;
 }
 
-function normalizePayload(payload) {
+// model 由调用方注入(config.model,本模块保持纯函数);上游模型名带部署日期
+// 后缀会轮换,改 config.js 一处即全项目生效
+function normalizePayload(payload, model) {
   const applied = [];
-  if (payload.model !== 'DeepSeek-V4-Flash') {
+  if (payload.model !== model) {
     if (payload.model !== undefined) applied.push('model=' + String(payload.model).slice(0, 40));
-    payload.model = 'DeepSeek-V4-Flash';
+    payload.model = model;
   }
   for (const key of UPSTREAM_REJECTED) {
     if (payload[key] !== undefined) {
