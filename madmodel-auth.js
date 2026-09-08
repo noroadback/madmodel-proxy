@@ -275,15 +275,27 @@ async function requestWithRedirects(options, jar, maxRedirects = 16) {
         if (!headers['Content-Type']) headers['Content-Type'] = 'application/x-www-form-urlencoded';
       }
     }
-    const res = await fetch(url, {
-      method, headers, body, redirect: 'manual',
-      signal: AbortSignal.timeout(options.timeout || 20000),
-    });
+    let res;
+    try {
+      res = await fetch(url, {
+        method, headers, body, redirect: 'manual',
+        signal: AbortSignal.timeout(options.timeout || 20000),
+      });
+    } catch (e) {
+      // 网络层错误统一挂 code:容忍判定(establishWebVpnSession)按 code 不按
+      // 文案,与项目其余"错误带 code"的纪律一致
+      e.code = e.code || (e.name === 'TimeoutError' || e.name === 'AbortError' ? 'NETWORK_TIMEOUT' : 'NETWORK_ERROR');
+      throw e;
+    }
     jar.absorb(url, res.headers.getSetCookie());
 
     const redirect = res.headers.get('location');
     if (res.status >= 300 && res.status < 400 && redirect) {
-      if (hops >= maxRedirects) throw new Error('重定向次数过多');
+      if (hops >= maxRedirects) {
+        const err = new Error('重定向次数过多');
+        err.code = 'TOO_MANY_REDIRECTS';
+        throw err;
+      }
       const next = resolveUrl(url, redirect);
       if (!isAllowedRedirect(next)) {
         // 首跳目标(即请求发起的域)必然合法;此处拒绝的是链中被带偏的后续跳
@@ -558,8 +570,9 @@ class MadmodelAuthClient {
       try {
         await this.attemptWebVpnLoginOnce(username, password, fingerPrint, twoFactorHandler);
       } catch (e) {
-        // 网络层错误(重定向循环/超时)不代表登录失败——服务端可能已完成登录
-        if (!/重定向次数过多|网络请求失败|fetch failed|timeout/i.test(String(e.message || ''))) throw e;
+        // 网络层错误(重定向循环/超时/连接失败)不代表登录失败——服务端可能已完成
+        // 登录;按 code 判定,不匹配错误文案
+        if (!['TOO_MANY_REDIRECTS', 'NETWORK_ERROR', 'NETWORK_TIMEOUT'].includes(e.code)) throw e;
         console.warn('[WebVPN] 登录链网络层错误(容忍并验证会话):', e.message);
       }
       if (await this.verifyWebVpnSession()) {
