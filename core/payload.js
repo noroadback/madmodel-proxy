@@ -42,6 +42,13 @@ function normalizePayload(payload, model) {
     delete payload.n;
     applied.push('-n');
   }
+  // 推理模型在极小 max_tokens 下会把预算全部耗在思考上,content 恒为空——
+  // 客户端的连通性探测常发 16/64 这类小预算(ZCode 实测 max_tokens:16),
+  // 会被误判为"模型空响应"。抬到下限保证内容有余量;大预算请求不受影响
+  if (typeof payload.max_tokens === 'number' && payload.max_tokens < 512) {
+    payload.max_tokens = 512;
+    applied.push(`max_tokens→512`);
+  }
   const wantsNoThinking = payload.reasoning_effort === 'none' ||
     payload.thinking === false || payload.thinking?.type === 'disabled';
   for (const key of ['thinking', 'reasoning_effort']) {
