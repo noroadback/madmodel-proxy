@@ -1,6 +1,6 @@
 {
   "name": "madmodel-proxy",
-  "version": "1.3.2",
+  "version": "1.4.0",
   "private": true,
   "license": "MIT",
   "description": "madmodel 本地 OpenAI 兼容代理 + 清华统一认证 token 自动续期(Windows 专用,GitHub 源码分发,不发布到 npm)",
@@ -14,9 +14,6 @@
   "engines": {
     "node": ">=18.14"
   },
-  "os": [
-    "win32"
-  ],
   "scripts": {
     "start": "node dashboard.js",
     "login": "node refresh-token.js login",

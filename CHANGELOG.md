@@ -2,6 +2,15 @@
 
 本文件记录各版本的行为变化与关键取舍。日期为实测或落地日期。
 
+## 1.4.0
+
+### 跨平台：macOS 与 Linux 支持（2026-09-08）
+
+- 凭据存储按平台实现。macOS 登录钥匙串：经系统自带 `security` 命令行，秘密走 stdin 不进进程列表，学号/指纹等非秘密字段留在 JSON 元数据。Linux 机器绑定 AES-256-GCM：密钥由 `/etc/machine-id` 与当前用户派生，文件被拷贝或同步到其他机器后不可解。Windows 的 DPAPI 路径不变，已有凭据无需迁移。
+- 进程锁实现提升为共享（`process.kill` 探活本就跨平台，原先只是住在 `platform/windows/` 目录下）；`package.json` 移除 `os` 限制。启动方式：Windows 双击 `start.cmd`，macOS / Linux 运行 `npm start`。
+- CI 增加三平台冒烟（ubuntu / macos / windows）：临时状态目录内做凭据与 token 的写入-读回往返（真实调用各平台存储原语）、无 token 启动代理并探活 `/v1/models`、watch 守护的无凭据调度循环。全程不访问学校服务、不消耗配额。
+- 验证口径。Windows 全量（本机真实流量）；Linux 于 WSL Ubuntu 端到端（真实 token 起代理、真实上游请求、token 热加载）；macOS 由 CI runner 覆盖存储与启动路径，真实登录链（含二次认证）尚无真机完整实测，首次使用如遇问题请带日志提 issue。
+
 ## 1.3.2
 
 ### 修复（2026-09-08）

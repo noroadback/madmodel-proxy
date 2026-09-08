@@ -49,7 +49,7 @@ function createTokenCache(config) {
         data = JSON.parse(fs.readFileSync(config.tokenFile, 'utf8'));
         if (!data.token) data = null;
       } else {
-        data = credentials.readToken(); // DPAPI 解密,坏记录返回 null
+        data = credentials.readToken(); // 平台解密(DPAPI/钥匙串/机器绑定),坏记录返回 null
       }
       const hadPrevious = !!cache.data;
       cache = { mtime: stat.mtimeMs, data };

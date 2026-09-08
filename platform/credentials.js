@@ -3,16 +3,22 @@
 //   credentials.readToken() / writeToken(token, expiresAt)
 //   credentials.readAccount() / writeAccount(user, pass, fingerprint) / hasAccount()
 //
-// 跨平台语义(与重写前的旧实现一致,CI 三平台测试依赖):
-//   - **读路径优雅降级**:token 文件的旧明文格式照常可读;加密数据在无
-//     DPAPI 的平台按"无数据"处理(返回 null),不抛错——否则非 Windows 上
-//     watch 守护会在第一个 readToken 就崩,跨平台 CI 无法运行;
-//   - **写路径明确拒绝**:非 Windows 调用 writeToken/writeAccount 抛
-//     "依赖 Windows DPAPI",绝不落明文(不做不成熟的跨平台明文回退)。
+// 三平台实现:
+//   win32   DPAPI(CurrentUser 范围,密文+元数据同文件)
+//   darwin  登录钥匙串(security 命令行;秘密在钥匙串,元数据在 JSON)
+//   linux   机器绑定 AES-256-GCM(machine-id+uid 派生密钥,同文件形态)
 //
-// 两套行为都实现在 ./windows/credentials(读降级在其内部:加密解不开时
-// 返回 null;写拒绝在其 dpapiInvoke 的平台检查),此处直接委托。
+// 共同语义(调用方依赖):
+//   - 读路径优雅降级:解不开/条目丢失按"无数据"返回 null,不抛——否则
+//     watch 守护会在第一个 readToken 就崩,token 热加载也会被单次损坏拖垮
+//   - 写路径原子:一律经 file-store 的 atomicWrite(0600),读者只见完整文件
+//   - 旧明文 token 格式照常可读(手工恢复路径),下次续期自动转加密
 
 'use strict';
 
-module.exports = require('./windows/credentials');
+const impl =
+  process.platform === 'win32' ? require('./windows/credentials') :
+  process.platform === 'darwin' ? require('./macos/credentials') :
+  require('./linux/credentials');
+
+module.exports = impl;
