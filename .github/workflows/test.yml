@@ -23,6 +23,12 @@ jobs:
         run: |
           node -e "const fs=require('fs'),path=require('path');const files=[];const walk=d=>{for(const e of fs.readdirSync(d,{withFileTypes:true})){if(e.isDirectory()){if(e.name!=='node_modules')walk(path.join(d,e.name))}else if(e.name.endsWith('.js'))files.push(path.join(d,e.name))}};walk('.');for(const f of files)require('child_process').execFileSync(process.execPath,['--check',f],{stdio:'inherit'})"
 
+      # 纯函数层(payload/aggregator/stream-parser/errors),零 I/O;
+      # 协议行为(未知帧型/网关形态)不在此处——那是 smoke-real.js 的职责,
+      # 有意不进 CI(访问真实校方服务并消耗配额)
+      - name: Pure-function tests
+        run: node --test
+
   platform:
     strategy:
       fail-fast: false
