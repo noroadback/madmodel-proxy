@@ -68,6 +68,7 @@ madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件�
 | `PROXY_NO_TOKEN_WAIT_MS` | 60000 | watch 守护未配置凭据时的重查间隔（毫秒） |
 | `PROXY_MAX_SLEEP_MS` | 3600000 | watch 守护单次等待上限（毫秒），到点醒来重读 token 状态 |
 | `PROXY_STREAM_TOTAL_MS` | 1200000 | 单次流式请求总时限（毫秒） |
+| `PROXY_NONSTREAM_TOTAL_MS` | 600000 | 非流式请求聚合总时限（毫秒） |
 | `DUMP_FAILED` | 关 | `=1` 时被上游拒绝的请求体落盘，含完整对话（隐私），排障后删 |
 
 ## 更多

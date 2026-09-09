@@ -309,8 +309,12 @@ async function requestWithRedirects(options, jar, maxRedirects = 16) {
         throw new Error(`登录链重定向被引向校外地址,已中止(可能被篡改): ${next}`);
       }
       url = next;
-      method = 'GET';
-      data = null;
+      // 307/308 按语义保留 method 与 body;301/302/303 转 GET 并丢 body
+      // (学校登录链现全部 302,实测验证;若哪天出现 307,POST 数据不再静默丢失)
+      if (res.status !== 307 && res.status !== 308) {
+        method = 'GET';
+        data = null;
+      }
       continue;
     }
     const buf = await readBodyLimited(res);

@@ -48,7 +48,7 @@ module.exports = Object.freeze({
   upstreamHeaderTimeout: 30e3,     // 发出请求到收到响应头的超时
   streamIdleTimeout: 120e3,        // 流式空闲超时(实测晚高峰 ~36tps,120s 足够)
   streamTotalTimeout: numberEnv('PROXY_STREAM_TOTAL_MS', 1200e3),
-  nonstreamTotalTimeout: 600e3,    // 非流式聚合总超时(实测流式 600s 不断)
+  nonstreamTotalTimeout: numberEnv('PROXY_NONSTREAM_TOTAL_MS', 600e3), // 非流式聚合总超时(实测流式 600s 不断)
   upstreamJsonBodyLimit: 5 * 1024 * 1024,   // JSON 错误页/直答体上限
   upstreamSseTotalLimit: 64 * 1024 * 1024,  // 单次流总字节上限
   sseLineLimit: 1024 * 1024,       // 尾部未完成行的字节上限(防病态流内存膨胀)

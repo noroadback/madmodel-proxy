@@ -16,6 +16,7 @@
 - 密码和 token 不写日志、不进 PowerShell 命令行参数、不发往 `*.tsinghua.edu.cn` 之外的任何地址
 - 登录链重定向只跟随 `https://*.tsinghua.edu.cn`，被引向校外地址立即中止
 - 代理只监听 `127.0.0.1`，外部网络无法直连（本地无鉴权，边界就是本机回环加 Host 白名单）
+- 浏览器恶意页面无法借本机端口盲发请求烧配额：跨源 POST 浏览器必带 Origin 头，非本机来源直接拒绝；非浏览器客户端（SDK、智能体）不发 Origin，不受影响
 - 仓库目录不写入任何运行时数据，诊断和状态文件都在状态目录（Windows 为 `%USERPROFILE%\.dsh-madmodel\`，macOS / Linux 为 `~/.dsh-madmodel/`）
 - Linux 的机器绑定加密：密钥由 `/etc/machine-id` 与当前用户派生，密文文件被拷贝或同步到其他机器后不可解（按无数据处理）；macOS 钥匙串同理，离开当前用户的钥匙串即不可读
 

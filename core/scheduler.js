@@ -80,7 +80,7 @@ class Scheduler {
           ? 5e3
           : config.retryBackoffMs[Math.min(retryIdx++, config.retryBackoffMs.length - 1)];
         nextAttemptAt = this.now() + wait;
-        this.logError('续期失败(' + e.code + '): ' + e.message + ', ' +
+        this.logError('续期失败(' + (e.code || 'unknown') + '): ' + e.message + ', ' +
           (wait >= 60e3 ? Math.round(wait / 60e3) + ' 分钟' : Math.round(wait / 1000) + ' 秒') + '后重试');
       }
     }

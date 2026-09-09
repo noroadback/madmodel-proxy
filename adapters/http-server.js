@@ -186,6 +186,21 @@ function createHttpServer({ config, service, getToken }) {
       service.logReq(req, 403, started, 0, 'host-rejected');
       return openAiError(res, 403, 'Host 头不在白名单,已拒绝(本代理仅限本机使用)');
     }
+    // 浏览器 CSRF 缓解:恶意网页可用 no-cors POST 向本机端口盲发请求(Host
+    // 是浏览器正确设置的,白名单防不住写入通道;浏览器对跨源 POST 必带
+    // Origin)。非本机来源拒绝;非浏览器客户端(SDK/智能体)不发 Origin,
+    // 自然豁免;localhost 系页面(本地 Web UI)放行
+    if (req.headers.origin !== undefined) {
+      let localOrigin = false;
+      try {
+        const h = new URL(req.headers.origin).hostname;
+        localOrigin = h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || h === '::1';
+      } catch (e) { /* 非法 Origin(含 null)按非本机拒绝 */ }
+      if (!localOrigin) {
+        service.logReq(req, 403, started, 0, 'origin-rejected');
+        return openAiError(res, 403, '跨源请求已拒绝(本代理仅限本机与本地页面使用)');
+      }
+    }
 
     // 伪造 models 端点(上游不存在该端点,返回 SPA HTML)。附带能力元数据:
     // dsh/pi-ai 读 context_window/context_length/max_output_tokens/max_tokens,
@@ -311,7 +326,9 @@ function createHttpServer({ config, service, getToken }) {
         return ctx.writeSseLine(`data: ${JSON.stringify(obj)}\n\n`);
       },
       writeSseLine(line) {
-        passthroughBytes += line.length;
+        // Buffer.byteLength:line.length 数的是 UTF-16 码元,中文流的 KB 日志
+        // 会偏小约 3 倍
+        passthroughBytes += Buffer.byteLength(line);
         if (!res.write(line)) return waitDrain();
       },
       endResponse() {

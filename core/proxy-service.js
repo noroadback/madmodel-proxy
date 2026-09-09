@@ -199,10 +199,13 @@ function createProxyService(deps) {
     const result = await upstreamClient.request({
       payload, token, signal: ac.signal,
       onChunk: async (obj) => {
+        // SSE 头延迟到首帧数据再发:上游"开流即报错"(SSE 内嵌 errorMessage,
+        // 如超上下文/繁忙)时头尚未发出,upstream-error 分支能以真实状态码
+        // 交付翻译后的错误;在 onOpen(响应头一到)就发头的话,客户端只能
+        // 看到无 [DONE] 的空流。onChunk 里这行同时覆盖正常流的首帧
         ctx.ensureSseHeaders();
         await ctx.writeSseChunk(obj);
       },
-      onOpen: (isSse) => { if (isSse) ctx.ensureSseHeaders(); },
     });
 
     if (ctx.clientGone() || result.type === 'aborted') {
@@ -272,7 +275,7 @@ function createProxyService(deps) {
     const timer = setTimeout(() => {
       timedOut = true;
       ac.abort(); // 中止上游,迟到的结果不再写响应
-      if (!ctx.headersSent()) {
+      if (!ctx.clientGone() && !ctx.headersSent()) {
         ctx.sendError(504, `聚合超时(${config.nonstreamTotalTimeout / 1000}s)。上游生成时间过长,建议客户端改用 stream:true`);
       }
     }, config.nonstreamTotalTimeout);
