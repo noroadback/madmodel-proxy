@@ -150,22 +150,25 @@ async function readChatBody(req, config) {
 }
 
 // ===== HTTP 服务 =====
-function createHttpServer({ config, service }) {
-  const getToken = createTokenCache(config);
-  const allowedHosts = new Set([
-    `127.0.0.1:${config.port}`, `localhost:${config.port}`, `[::1]:${config.port}`,
-    '127.0.0.1', 'localhost', '[::1]',
-  ]);
-
-  // token 状态判定(HTTP 层读文件,状态语义供 service 消化)
-  function tokenState() {
+// token 状态判定(纯逻辑):由入口组装后分别注入 service 与 HTTP 层,
+// 依赖单向流动,消除 service→httpServer→service 的前向引用
+function createTokenState(getToken) {
+  return function tokenState() {
     const data = getToken();
     if (!data || !data.token) return { code: 'no-token' };
     const exp = data.expiresAt || jwtExpiresAt(data.token);
     const msLeft = exp - Date.now();
     if (msLeft < 0) return { code: 'token-expired' };
     return { ok: true, token: data.token, msLeft };
-  }
+  };
+}
+
+function createHttpServer({ config, service, getToken }) {
+  const allowedHosts = new Set([
+    `127.0.0.1:${config.port}`, `localhost:${config.port}`, `[::1]:${config.port}`,
+    '127.0.0.1', 'localhost', '[::1]',
+  ]);
+  const tokenState = createTokenState(getToken);
 
   const server = http.createServer((req, res) => {
     const started = Date.now();
@@ -355,4 +358,4 @@ function createHttpServer({ config, service }) {
   };
 }
 
-module.exports = { createHttpServer };
+module.exports = { createHttpServer, createTokenCache, createTokenState };

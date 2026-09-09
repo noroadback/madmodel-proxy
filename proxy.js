@@ -23,15 +23,20 @@
 const config = require('./config');
 const { createUpstreamClient } = require('./core/upstream-client');
 const { createProxyService } = require('./core/proxy-service');
-const { createHttpServer } = require('./adapters/http-server');
+const { createHttpServer, createTokenCache, createTokenState } = require('./adapters/http-server');
 const paths = require('./platform/paths');
 
+// token 读取/缓存与状态判定先于 service 与 HTTP 层独立创建,再分别注入:
+// 依赖单向流动。此前 service 经闭包前向引用尚未创建的 httpServer(TDZ,
+// 当前惰性调用安全,但构造期调用或重构极易踩 ReferenceError)
+const getToken = createTokenCache(config);
+const tokenState = createTokenState(getToken);
 const service = createProxyService({
   config,
-  tokenState: () => httpServer.auth.tokenState(),
+  tokenState,
   upstreamClient: createUpstreamClient(config),
 });
-const httpServer = createHttpServer({ config, service });
+const httpServer = createHttpServer({ config, service, getToken });
 
 process.on('unhandledRejection', e => {
   // 长驻进程:记日志不退出,单次请求的异常不应拖垮整个代理。

@@ -39,7 +39,6 @@ module.exports = Object.freeze({
   // 请求体限制(nginx 1MB 硬限,代理预留 950KB)
   bodyLimit: 950 * 1024,
   bodyTimeout: 60e3,               // 请求体接收完成时限
-  promptTokenLimit: 240000,        // prompt 估算上限,留余量于上游 256K 上下文
 
   // 并发处理硬上限:进程保护(防失控客户端拖垮内存/连接),非常规业务限流;
   // 64 覆盖多子代理编排的合法负载。刻意不可配置——见 proxy-service 注释

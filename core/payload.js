@@ -42,23 +42,25 @@ function normalizePayload(payload, model) {
     delete payload.n;
     applied.push('-n');
   }
+  // 关闭思考的方言先判定(判定字段随后会被剥离)
+  const wantsNoThinking = payload.reasoning_effort === 'none' ||
+    payload.thinking === false || payload.thinking?.type === 'disabled';
   // 推理模型在极小 max_tokens 下会把预算全部耗在思考上,content 恒为空——
   // 客户端的连通性探测常发 16/64 这类小预算(ZCode 实测 max_tokens:16),
-  // 会被误判为"模型空响应"。抬到下限保证内容有余量
-  if (typeof payload.max_tokens === 'number' && payload.max_tokens < 512) {
+  // 会被误判为"模型空响应"。仅在思考开启时抬到下限;思考关闭的请求维持
+  // 客户端原值(显式要短回答的请求不被放宽)
+  if (!wantsNoThinking && typeof payload.max_tokens === 'number' && payload.max_tokens < 512) {
     payload.max_tokens = 512;
     applied.push(`max_tokens→512`);
   }
   // 上游校验 prompt+max_tokens ≤ 262,144:按官方目录自动配置的客户端(如
   // ZCode 匹配 deepseek-v4-flash 的 384K 输出规格)会发超大 max_tokens,被
   // 上游以"服务器繁忙"错误帧秒拒,流式形态即空流。压到 65536(参数实测
-  // 接受,模型自然停止远早于此);超大 prompt 由 promptTokenLimit 门另行把关
+  // 接受,模型自然停止远早于此);prompt 侧的联合校验在 proxy-service 早退
   if (typeof payload.max_tokens === 'number' && payload.max_tokens > 65536) {
     payload.max_tokens = 65536;
     applied.push(`max_tokens→65536`);
   }
-  const wantsNoThinking = payload.reasoning_effort === 'none' ||
-    payload.thinking === false || payload.thinking?.type === 'disabled';
   for (const key of ['thinking', 'reasoning_effort']) {
     if (payload[key] !== undefined) {
       delete payload[key];

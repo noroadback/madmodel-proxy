@@ -47,7 +47,7 @@ madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件�
 ## 边界
 
 - **本地无鉴权**。只监听 `127.0.0.1` + Host 白名单，客户端 API key 填任意值
-- **只有 chat completions**。无 embeddings、图像、音频；单模型，任意模型名都会被重写为 `DeepSeek-V4-Flash-0731`；`logprobs`/`n>1` 被剥离（上游拒绝）；`max_tokens` 收敛到 [512, 65536]（推理模型小预算下会只剩思考，超大值会撞上游 prompt+max_tokens≤262K 的校验）
+- **只有 chat completions**。无 embeddings、图像、音频；单模型，任意模型名都会被重写为 `DeepSeek-V4-Flash-0731`；`logprobs`/`n>1` 被剥离（上游拒绝）；`max_tokens` 收敛到 [512, 65536]（下限仅思考开启时生效；prompt+max_tokens 超过 262,144 会本地提前 413）
 
 ## 常见问题
 

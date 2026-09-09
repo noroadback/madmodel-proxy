@@ -22,8 +22,15 @@ function stamp() {
 }
 
 function estimateTokens(bodyBuffer) {
-  // 无分词器的粗估:UTF-8 字节 ÷ 3.5(中文≈1字/token 但占3字节,英文≈4字符/token 的折中)
-  return Math.round(bodyBuffer.length / 3.5);
+  // 无分词器的粗估,按字节类别分开计量(2026-09-09 实测 DeepSeek V4 分词器):
+  // 中文 ≈4.8 字节/token、英文散文 ≈4、数字/代码 ≈3(最后一类会低估,漏网
+  // 请求由上游秒级错误帧兜底)。旧的统一 bytes/3.5 对中文高估约 37%(把
+  // 本可成功的中文长上下文提前 413)、对英文低估约 12%
+  let ascii = 0, multibyte = 0;
+  for (let i = 0; i < bodyBuffer.length; i++) {
+    if (bodyBuffer[i] < 0x80) ascii++; else multibyte++;
+  }
+  return Math.round(ascii / 4 + multibyte / 4.8);
 }
 
 function createProxyService(deps) {
@@ -145,11 +152,16 @@ function createProxyService(deps) {
     }
     const { payload, clientWantsStream, normNote } = prepared;
 
-    // ---- 上游前的廉价早退:prompt 估算超限不占上游调用
+    // ---- 上游前的廉价早退:上游的实际上下文校验是 prompt+max_tokens ≤
+    // 262,144(2026-09-09 实测),此处按同一口径拦截。估算按内容类别有
+    // ±15% 量级误差,漏网的由上游秒级错误帧兜底(诚实失败,晚一秒)。
+    // max_tokens 缺省时按 0 计(上游对缺省值的行为未知,交给上游仲裁)
     const estTokens = estimateTokens(ctx.rawBody);
-    if (estTokens > config.promptTokenLimit) {
-      logReq(ctx.req, 413, ctx.started, ctx.size, `token-est=${estTokens}`);
-      return ctx.sendError(413, `prompt 估算 ${estTokens} tokens,逼近上游 256K 上下文上限。请在客户端压缩上下文(history/truncate)后重试。`);
+    const tokenBudget = typeof payload.max_tokens === 'number' ? payload.max_tokens : 0;
+    if (estTokens + tokenBudget > config.contextWindow) {
+      logReq(ctx.req, 413, ctx.started, ctx.size, `token-est=${estTokens}+${tokenBudget}`);
+      return ctx.sendError(413,
+        `prompt 估算 ${estTokens} + max_tokens ${tokenBudget} 超过上游 262,144 tokens 上下文上限。请在客户端压缩上下文(history/truncate)后重试。`);
     }
 
     // ---- 进程保护硬上限:非常规业务限流——多子代理编排(几十路并发)是合法
