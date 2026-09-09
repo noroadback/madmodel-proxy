@@ -95,6 +95,7 @@ function claimFile(file, content, isUsable, attempts = 8) {
 function createFileWakeup(files) {
   const directories = new Map();
   const watchers = [];
+  const mtimes = new Map(); // basename → 上次事件时的 mtime(伪事件过滤)
   const normalize = name => process.platform === 'win32' ? name.toLowerCase() : name;
   let changed = false;
   let pending = null;
@@ -114,7 +115,22 @@ function createFileWakeup(files) {
   for (const [directory, names] of directories) {
     try {
       const watcher = fs.watch(directory, { persistent: false }, (_, name) => {
-        if (name === null || names.has(normalize(String(name)))) wake();
+        if (name === null) { wake(); return; } // 无名事件(目录级):保守唤醒
+        const norm = normalize(String(name));
+        if (!names.has(norm)) return;
+        // Windows/NTFS 的伪事件过滤:读取文件会更新 atime 且延迟最多 1 小时
+        // 落盘,fs.watch 会把 atime 更新当事件上报(FILE_NOTIFY_CHANGE_LAST_
+        // ACCESS)。守护自己的每小时例行读取正好触发延迟刷盘,伪事件会让
+        // 调度器多跑一圈(日志双行)。mtime 未变即伪事件,忽略——真实写入
+        // (原子替换)必然改变 mtime;文件被删等 stat 失败则保守唤醒。
+        // 附带收益:Windows 对一次写入常发双事件,此处顺带去重
+        try {
+          const mtime = fs.statSync(path.join(directory, String(name))).mtimeMs;
+          const prev = mtimes.get(norm);
+          mtimes.set(norm, mtime);
+          if (prev !== undefined && prev === mtime) return;
+        } catch (e) { /* stat 失败:保守唤醒 */ }
+        wake();
       });
       // The timer remains active if the directory disappears or watching fails.
       watcher.on('error', () => watcher.close());
