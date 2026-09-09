@@ -25,6 +25,8 @@ Windows 双击 **start.cmd** 启动（首次会问是否创建桌面快捷方式
 | API Key | 任意值（本地无鉴权） |
 | 模型 | `DeepSeek-V4-Flash-0731` |
 
+客户端要求填写上下文长度时填 `262144`（学校部署的实际值）。不要按官方 DeepSeek 规格配置——部分客户端会自动匹配到官方的 1M 上下文，长会话会越过上限。
+
 详细步骤与故障排查见 [docs/connect-dsh.md](docs/connect-dsh.md)。
 
 ## 为什么需要它

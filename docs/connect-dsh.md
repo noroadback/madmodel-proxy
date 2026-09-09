@@ -45,6 +45,8 @@ macOS / Linux 上 `token 文件` 一行显示为 `~/.dsh-madmodel/token.json`，
 | API Key | 任意值（本地无鉴权，字段仅需满足界面非空校验） |
 | 模型名 | `DeepSeek-V4-Flash-0731` |
 
+客户端要求填写上下文长度时填 `262144`（学校部署的实际值，不要用官方 DeepSeek 的 1M 规格）。
+
 ## 第 4 步：验证
 
 在 dsh 里发一条消息，收到回复即完成。也可以先跑 `curl http://127.0.0.1:8080/v1/models` 确认代理存活，返回模型列表即正常，此时问题只会出在 dsh 的 Base URL 或模型名配置上。
