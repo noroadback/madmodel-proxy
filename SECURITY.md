@@ -7,13 +7,14 @@
 | 数据 | 静态存储 | 传输目的地 | 备注 |
 |---|---|---|---|
 | 统一认证密码 | 按平台静态加密（Windows DPAPI / macOS 登录钥匙串 / Linux 机器绑定加密），`creds.json` 或钥匙串，状态目录 `~/.madmodel-proxy/` | 仅以 SM2 加密报文发往 `id.tsinghua.edu.cn` | 不写日志、不进命令行、不经任何第三方 |
-| madmodel token | 按平台静态加密，同上（`token.json` 或钥匙串） | 仅作为 Bearer 头发往 `madmodel.cs.tsinghua.edu.cn` | 同上 |
+| madmodel token | 按平台静态加密，同上（`token.json` 或钥匙串） | 仅作为 Bearer 头发往 WebVPN 隧道（`webvpn.tsinghua.edu.cn`，2026-09-10 起上游默认走隧道） | 同上 |
+| WebVPN 会话 cookie | 按平台静态加密，随 token 一同存储（`token.json` 密文字段 `cipherCookie`，或钥匙串 `webvpn-cookie` 条目） | 仅随上游请求以 `Cookie` 头回传 WebVPN 隧道，用于隧道会话保活 | 与 token 同级秘密，凭它可冒用整个 WebVPN 会话；不写日志 |
 | 对话内容 | 不落盘（默认） | 经本代理发往 madmodel 上游 | `DUMP_FAILED=1` 时失败请求会落盘到状态目录，该文件含完整对话，排障后应删除 |
 | 设备指纹 | 随凭据文件存储 | 发往学校登录服务用于可信设备登记 | 32 个十六进制字符（16 字节），每次安装重新生成 |
 
 ## 明确不会发生的事
 
-- 密码和 token 不写日志、不进 PowerShell 命令行参数、不发往 `*.tsinghua.edu.cn` 之外的任何地址
+- 密码、token 和 WebVPN 会话 cookie 不写日志、不进 PowerShell 命令行参数、不发往 `*.tsinghua.edu.cn` 之外的任何地址
 - 登录链重定向只跟随 `https://*.tsinghua.edu.cn`，被引向校外地址立即中止
 - 代理只监听 `127.0.0.1`，外部网络无法直连（本地无鉴权，边界就是本机回环加 Host 白名单）
 - 浏览器恶意页面无法借本机端口盲发请求烧配额：跨源 POST 浏览器必带 Origin 头，非本机来源直接拒绝；非浏览器客户端（SDK、智能体）不发 Origin，不受影响

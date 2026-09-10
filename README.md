@@ -2,6 +2,8 @@
 
 把清华的 DeepSeek 服务（[madmodel.cs.tsinghua.edu.cn](https://madmodel.cs.tsinghua.edu.cn/)）变成本地 OpenAI 端点。token 过期自动续期，上游接口的兼容性问题在代理层处理，客户端只需连 `http://127.0.0.1:8080/v1`。
 
+2026-09-10 起直连域名被校园网 oauth 门禁接管，上游默认走 **WebVPN 隧道**（校内、校外网络都能访问），无需区分场景，见[校内 / 校外](#校内--校外)。
+
 ## 使用
 
 前置是 Windows、macOS 或 Linux，Node.js ≥ 18.14，以及一个清华统一认证账号。
@@ -37,11 +39,25 @@ Windows 双击 **start.cmd** 启动（首次会问是否创建桌面快捷方式
 
 ## 为什么需要它
 
-madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件事。
+madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件事。此外，2026-09-10 起直连域名 `madmodel.cs.tsinghua.edu.cn` 还被校园网新版 TsinghuaLB 的 oauth 门禁接管：未带 LB 凭证的请求被 307 到统一认证并丢失请求体，无法直接使用；因此上游统一走 **WebVPN 隧道**（不受门禁影响，校内外网络都可达），见[校内 / 校外](#校内--校外)。
 
 **token 有效期短**。key 只有 5 小时有效期，只能网页登录后手动复制，重度使用一天要重复数次。本工具用统一认证链自动续期，到期前 30 分钟换新，代理热加载。
 
 **接口行为与客户端预期不符**。非流式请求 60 秒整被网关掐断；错误都以 `HTTP 200` 返回"服务器繁忙"；`/v1/models` 返回网页 HTML（以上为 2026-09 直连实测）。本工具在代理层逐项适配，对上游恒以流式请求、客户端要非流式就聚合，错误翻译回真实状态码。
+
+### 校内 / 校外
+
+认证与上游传输统一走 WebVPN 隧道，隧道从校内、校外网络都能访问，**默认配置两类场景都直接可用，无需区分**。
+
+- **校外**：绝大多数场景，用默认配置走隧道即可，什么都不用配。
+- **校内**（校园网可直连 madmodel 时，可选更快、少一跳）：用 `PROXY_UPSTREAM` 把上游覆盖为直连端点。只有确认校园网内直连确实可用时才这样配；此时隧道会话保活自动关闭（直连无会话 cookie 可探，且直连被门禁挡时的 3xx 会被探活误判为失效）。
+
+```sh
+# 校内直连（仅校园网内、确认直连可用时）
+PROXY_UPSTREAM=https://madmodel.cs.tsinghua.edu.cn/v1/chat/completions npm start
+```
+
+无论哪种场景，token 都由认证链经 WebVPN 隧道换取、到期自动续期，行为一致。
 
 ## 特性
 
@@ -65,6 +81,7 @@ madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件�
 | 请求 413 上下文超限 | 会话接近 262,144 tokens 上限（`max_tokens` 已被代理自动收缩过仍不够）。新开会话，或让客户端压缩 history |
 | 启动报 `端口 8080 已被占用` | 代理已在运行，直接使用；需另开实例时用 `PROXY_PORT` |
 | 上游 401/502/429 | 上游侧问题，通常自愈；持续出现提 issue 附代理日志 |
+| 闲置过久后请求异常 | 隧道会话空闲过期（cookie 闲置约 2 小时失效）。watch 守护每 `PROXY_KEEPALIVE_MS`（默认 25 分钟）保活隧道、会话失效自动重签 token+cookie，通常无需干预 |
 | token 长期无人续期 | 改过密码或二次认证过期，重跑一次 `node refresh-token.js login` |
 | 仓库文件夹丢失 | 重新 clone 即可，登录状态不丢：状态目录（`~/.madmodel-proxy/`）与仓库分离 |
 
@@ -72,10 +89,12 @@ madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件�
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
+| `PROXY_UPSTREAM` | 默认 WebVPN 隧道 | 覆盖上游端点。校内直连用 `madmodel.cs.tsinghua.edu.cn/v1/chat/completions`；测试可指向本地假上游；否则保持默认 |
 | `PROXY_PORT` | `8080` | 监听端口 |
 | `PROXY_REFRESH_AHEAD_MS` | 1800000 | 提前续期窗口（毫秒） |
 | `PROXY_NO_TOKEN_WAIT_MS` | 60000 | watch 守护未配置凭据时的重查间隔（毫秒） |
 | `PROXY_MAX_SLEEP_MS` | 3600000 | watch 守护单次等待上限（毫秒），到点醒来重读 token 状态 |
+| `PROXY_KEEPALIVE_MS` | 1500000 | 隧道会话保活探活间隔（默认 25 分钟）；只有默认隧道上游时生效
 | `PROXY_STREAM_TOTAL_MS` | 1200000 | 单次流式请求总时限（毫秒） |
 | `PROXY_NONSTREAM_TOTAL_MS` | 600000 | 非流式请求聚合总时限（毫秒） |
 | `DUMP_FAILED` | 关 | `=1` 时被上游拒绝的请求体落盘，含完整对话（隐私），排障后删 |
