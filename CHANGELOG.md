@@ -2,6 +2,24 @@
 
 本文件记录各版本的行为变化与关键取舍。日期为实测或落地日期。
 
+## 1.7.0
+
+### 上游默认走 WebVPN 隧道 + 会话 cookie 保活（2026-09-10）
+
+**背景**：2026-09-10 起 madmodel 直连域名 `madmodel.cs.tsinghua.edu.cn` 被校园网新版 TsinghuaLB（26.09.07）的 oauth 门禁接管：未带 LB 凭证的请求一律 307 到 `oauth.tsinghua.edu.cn`，且跟随回跳链会丢失 Authorization/请求体（最终 10003）。WebVPN 隧道（`wengine_vpn_ticket` cookie + Bearer）不受该门禁影响，实测稳定可用。认证链本就只走 WebVPN 隧道换 token，本次把 chat 请求的上游传输也统一到隧道路径，并解决随之而来的一个新问题：会话 cookie 空闲约 2 小时失效（隧道对未认证会话固定 302 → /login），而 token 有效期约 5 小时——只随 token 续期的话，闲置超过 cookie 寿命后代理会坏到下个续期窗口。
+
+**变化**：
+
+- 默认上游从直连域名切到 WebVPN 隧道前缀（`config.js` `DEFAULT_UPSTREAM`）；token 仍由认证链经隧道端点换取，与 cookie 同生命周期
+- WebVPN 会话 cookie 随 token 一同持久化与续期：Windows/Linux 走文件型凭据存储新增 `cipherCookie` 字段，macOS 走登录钥匙串新增 `webvpn-cookie` 条目；旧格式记录无该字段时读侧缺省，向后兼容
+- watch 守护新增隧道保活：`PROXY_KEEPALIVE_MS`（默认 25 分钟）周期带 cookie 探活（探测本身重置隧道空闲计时，把闲置寿命稳稳撑在 2 小时阈值之上），启动即探活一次修复"闲置后启动、cookie 已死"
+- 探活判定 `classifyProbeStatus` 抽成纯函数并导出（2xx/4xx/5xx=会话有效、3xx=会话失效、网络层错误=network）
+- 保活状态机（`core/scheduler.js` `runKeepaliveIfDue`）：`invalid` 立即重签 token+cookie、90 秒后复核新凭据；重签失败 5 分钟后再探；`network`（网络抖动）不动凭据、90 秒后重探。独立节奏，不吃 token 主续期循环的指数退避档位
+- 传输形态兼顾校内/校外：校内外认证与上游都经 WebVPN 隧道（校内外网络均可达），默认两类场景直接可用；校内可直接用 `PROXY_UPSTREAM` 覆盖为直连域名，直连形态下保活自动禁用——直连无会话 cookie 可探，且其 3xx（如门禁 307）会被 `classifyProbeStatus` 误判为 invalid 触发无谓续期，故 `keepaliveUrl` 仅对隧道路径推导
+- 上游请求在隧道形态下携带 `Cookie` 头回传隧道会话；直连上游（老配置/覆盖）不带该头不受影响（`core/upstream-client.js`）
+
+**验证**：新增离线单测 4 组，覆盖保活推导（`config-keepalive`）、保活状态机（`scheduler-keepalive`）、cookie 持久化往返（`credential-store`）、探活状态分类（`probe-classify`），全套 102 项绿（`npm test`）；`npm run check:release` 通过。真实流量冒烟（`npm run smoke`）：隧道形态 cookie 透传、302 → /login 判定与重签节奏经 2026-09-10 本机实测校验。
+
 ## 1.6.1
 
 ### 状态目录更名 `.dsh-madmodel` → `.madmodel-proxy`（2026-09-10）

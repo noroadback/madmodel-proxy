@@ -24,6 +24,9 @@ const { TOKEN_FILE, CREDS_FILE } = require('../paths');
 const SERVICE = 'madmodel-proxy';
 const ACCOUNT_PASSWORD = 'password';
 const ACCOUNT_TOKEN = 'token';
+// WebVPN 隧道会话 cookie:与 token 同级秘密(凭它可冒用整个 WebVPN 会话),
+// 按本文件纪律入钥匙串;token.json 元数据不含它
+const ACCOUNT_COOKIE = 'webvpn-cookie';
 
 // 秘密以 base64 编码过钥匙串命令行通道:security CLI 对非 ASCII 的 argv 与
 // 输出编码行为不可靠(CI 于 macOS runner 实测,含中文/符号的密码与 token
@@ -58,10 +61,13 @@ function keychainRead(account) {
 }
 
 // ===== token 存取 =====
-function writeToken(token, expiresAt) {
+// cookie(webvpn 会话)可选:新链路随 token 一同写入;undefined 表示本次
+// 调用方没有新 cookie(如旧格式调用),保留钥匙串既有条目不动
+function writeToken(token, expiresAt, cookie) {
   // 先更新钥匙串再动元数据文件:代理按文件 mtime 触发重读,反序会出现
   // "新元数据 + 旧 token"的窗口
   keychainWrite(ACCOUNT_TOKEN, token);
+  if (cookie !== undefined) keychainWrite(ACCOUNT_COOKIE, cookie);
   atomicWrite(TOKEN_FILE, JSON.stringify({
     v: 1,
     expiresAt,
@@ -69,13 +75,17 @@ function writeToken(token, expiresAt) {
   }, null, 2));
 }
 
-// 返回 { token, expiresAt } 或 null;坏记录返回 null 让调用方按"无 token"处理
+// 返回 { token, expiresAt, cookie? } 或 null;坏记录返回 null 让调用方按"无 token"处理。
+// cookie 缺条目(升级前旧状态)时字段缺省,调用方按"无隧道凭证"处理
 function readToken() {
   try {
     const meta = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8'));
     const token = keychainRead(ACCOUNT_TOKEN);
     if (!token || !Number.isFinite(meta.expiresAt)) return null;
-    return { token, expiresAt: meta.expiresAt };
+    const cookie = keychainRead(ACCOUNT_COOKIE);
+    return cookie
+      ? { token, expiresAt: meta.expiresAt, cookie }
+      : { token, expiresAt: meta.expiresAt };
   } catch (e) {
     return null;
   }

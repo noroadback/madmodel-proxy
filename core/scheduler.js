@@ -12,6 +12,13 @@
 //   - BAD_CREDENTIALS 连续达到上限后停止(抛出)
 //   - AUTH_BUSY(人工 login 持锁的正常争用)短退避,不吃指数档位
 //   - stop() / 结束时清理 pending 等待;wakeup 由调用方在 finally 关闭
+//
+// 保活(可选,注入 keepalive 探测函数后启用):
+//   - 等待时长额外受 nextKeepaliveAt 封顶,到期探活隧道会话
+//   - 启动时立即探活一次(修复"闲置后启动,cookie 已死"的场景)
+//   - 'invalid' 立刻走 refresh 重签 token+cookie,90 秒后复核新凭据;
+//     重签失败 5 分钟后再探(独立的轻量节奏,不吃主循环退避档位)
+//   - 'network'(网络抖动)不动凭据,静默等下个周期
 
 'use strict';
 
@@ -26,12 +33,54 @@ class Scheduler {
     this.logError = logError || (() => {});
     this.now = now;
     this.stopping = false;
+    // keepalive: () => 'ok' | 'invalid' | 'network'(协议细节在注入方);
+    // 未注入(测试/非隧道上游)时保活整体禁用
+    this.keepalive = null;
+    this.nextKeepaliveAt = 0;
+  }
+
+  // 注入保活探测函数后启用保活;启用即时钟从 0 起,主循环首次等待前即探活
+  enableKeepalive(probe) {
+    this.keepalive = probe;
+    this.nextKeepaliveAt = 0;
   }
 
   // 外部关闭:解除挂起的等待,循环在下一次检查点退出
   stop() {
     this.stopping = true;
     this.wakeup.close();
+  }
+
+  // 保活到期则探活;返回是否已到期执行(主循环据此决定 continue)
+  async runKeepaliveIfDue() {
+    if (!this.keepalive) return false;
+    if (this.now() < this.nextKeepaliveAt) return false;
+    const { config } = this;
+    this.nextKeepaliveAt = this.now() + config.keepAliveIntervalMs;
+    let verdict;
+    try {
+      verdict = await this.keepalive();
+    } catch (e) {
+      verdict = 'network';
+    }
+    if (verdict === 'ok') return true;
+    if (verdict === 'network') {
+      // 网络抖动不动凭据,但不能等满一个保活周期——期间代理可能正坏着
+      // (会话已失效未检出),短周期重探尽快把状态问清楚
+      this.nextKeepaliveAt = this.now() + 90e3;
+      return true;
+    }
+    this.log('WebVPN 隧道会话已失效,提前续期(重签 token + cookie)');
+    try {
+      await this.refresh();
+      // 90 秒后复核新 cookie 确已生效,而不是等满一个保活周期
+      this.nextKeepaliveAt = this.now() + 90e3;
+    } catch (e) {
+      if (e.code === 'TWO_FACTOR_REQUIRED') throw e;
+      this.logError('保活触发的续期失败(' + (e.code || 'unknown') + '): ' + e.message + ',5 分钟后再试');
+      this.nextKeepaliveAt = this.now() + 5 * 60e3;
+    }
+    return true;
   }
 
   async run() {
@@ -46,8 +95,13 @@ class Scheduler {
       const current = this.readToken();
       const untilRefresh = current ? current.expiresAt - this.now() - config.refreshAheadMs : 0;
       if (untilRefresh > 0) {
+        // 等待同时受保活周期封顶;keepalive 未启用时 untilKeepalive 为 Infinity
+        const untilKeepalive = this.keepalive
+          ? Math.max(0, this.nextKeepaliveAt - this.now()) : Infinity;
         this.log('token 有效至 ' + new Date(current.expiresAt).toLocaleString() + ',等待续期窗口');
-        await wakeup.wait(Math.min(untilRefresh, config.maxSleepMs));
+        await wakeup.wait(Math.min(untilRefresh, config.maxSleepMs, untilKeepalive));
+        if (this.stopping) break;
+        await this.runKeepaliveIfDue();
         if (this.stopping) break;
         continue;
       }

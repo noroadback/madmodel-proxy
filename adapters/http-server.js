@@ -163,7 +163,9 @@ function createTokenState(getToken) {
     const exp = data.expiresAt || jwtExpiresAt(data.token);
     const msLeft = exp - Date.now();
     if (msLeft < 0) return { code: 'token-expired' };
-    return { ok: true, token: data.token, msLeft };
+    // cookie:WebVPN 隧道会话凭证,随 token 一同续期;旧记录无此字段时为
+    // undefined,上游侧按"不带 Cookie 头"处理(直连上游的老配置仍可工作)
+    return { ok: true, token: data.token, msLeft, cookie: data.cookie };
   };
 }
 

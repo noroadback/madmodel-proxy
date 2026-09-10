@@ -25,24 +25,33 @@ module.exports = function createFileCredentialStore({ protect, unprotect }) {
   }
 
   // ===== token 存取 =====
-  function writeToken(token, expiresAt) {
-    atomicWrite(TOKEN_FILE, JSON.stringify({
+  // cookie(webvpn 会话)可选:新链路随 token 一同写入;undefined 表示调用方
+  // 没有新 cookie(如旧格式调用),不写该字段、读侧沿用旧记录里的
+  function writeToken(token, expiresAt, cookie) {
+    const record = {
       v: 1,
       cipher: protect(token),
       expiresAt,
       updatedAt: new Date().toISOString(),
-    }, null, 2));
+    };
+    if (cookie !== undefined) record.cipherCookie = protect(cookie);
+    atomicWrite(TOKEN_FILE, JSON.stringify(record, null, 2));
   }
 
-  // 返回 { token, expiresAt } 或 null;坏记录返回 null 让调用方按"无 token"处理
+  // 返回 { token, expiresAt, cookie? } 或 null;坏记录返回 null 让调用方按"无 token"处理。
+  // cookie 缺字段(升级前旧记录)时字段缺省,调用方按"无隧道凭证"处理
   function readToken() {
     try {
-      const record = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8'));
+      const record = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf-8'));
       let token = null;
       if (record && typeof record.token === 'string') token = record.token; // 旧明文格式
       else if (record && record.v === 1 && typeof record.cipher === 'string') token = tryUnprotect(record.cipher);
       if (!token || !Number.isFinite(record.expiresAt)) return null;
-      return { token, expiresAt: record.expiresAt };
+      const result = { token, expiresAt: record.expiresAt };
+      const cookie = record.v === 1 && typeof record.cipherCookie === 'string'
+        ? tryUnprotect(record.cipherCookie) : null;
+      if (cookie) result.cookie = cookie;
+      return result;
     } catch (e) {
       return null;
     }

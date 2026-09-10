@@ -6,7 +6,7 @@
 'use strict';
 
 const readline = require('readline');
-const { MadmodelAuthClient, CookieJar, AuthError, generateFingerprint } = require('./madmodel-auth');
+const { MadmodelAuthClient, CookieJar, AuthError, generateFingerprint, probeWebvpnSession } = require('./madmodel-auth');
 const credentials = require('./platform/credentials');
 const processLock = require('./platform/process-lock');
 const { createFileWakeup } = require('./platform/file-store');
@@ -69,9 +69,9 @@ async function fetchToken(accountCredentials, { interactive = true } = {}) {
 async function login({ username, password }) {
   return withAuthLock(async () => {
     const fingerPrint = generateFingerprint();
-    const { token, expiresAt } = await fetchToken({ username, password, fingerPrint });
+    const { token, expiresAt, cookie } = await fetchToken({ username, password, fingerPrint });
     credentials.writeAccount(username, password, fingerPrint);
-    credentials.writeToken(token, expiresAt);
+    credentials.writeToken(token, expiresAt, cookie);
     return { expiresAt, fingerPrint, tokenFile: TOKEN_FILE, credsFile: CREDS_FILE };
   });
 }
@@ -82,8 +82,8 @@ async function refresh({ interactive = true } = {}) {
   return withAuthLock(async () => {
     const creds = credentials.readAccount();
     if (!creds) throw new Error('未配置凭据,请先: node refresh-token.js login');
-    const { token, expiresAt } = await fetchToken(creds, { interactive });
-    credentials.writeToken(token, expiresAt);
+    const { token, expiresAt, cookie } = await fetchToken(creds, { interactive });
+    credentials.writeToken(token, expiresAt, cookie);
     return { expiresAt, tokenFile: TOKEN_FILE };
   });
 }
@@ -125,6 +125,17 @@ async function watch() {
     log: msg => console.log('[' + stamp() + '] ' + msg),
     logError: msg => console.error('[' + stamp() + '] ' + msg),
   });
+  // 隧道会话保活:带存储的 cookie 探活 WebVPN 隧道(探测本身重置隧道空闲
+  // 计时),失效则 scheduler 立即重签。上游非隧道形态(config.keepaliveUrl
+  // 为 null,如测试假上游)时不启用
+  if (config.keepaliveUrl) {
+    scheduler.enableKeepalive(async () => {
+      const t = credentials.readToken();
+      // 无 token 时探活无意义(主循环自会走续期路径),按 ok 跳过
+      if (!t) return 'ok';
+      return probeWebvpnSession(config.keepaliveUrl, t.cookie);
+    });
+  }
   activeScheduler = scheduler;
   try {
     await scheduler.run();
