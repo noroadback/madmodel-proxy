@@ -21,16 +21,31 @@ function stamp() {
   return new Date().toTimeString().slice(0, 8);
 }
 
-function estimateTokens(bodyBuffer) {
+function estimateTokens(bodyBuffer, pessimistic) {
   // 无分词器的粗估,按字节类别分开计量(2026-09-09 实测 DeepSeek V4 分词器):
   // 中文 ≈4.8 字节/token、英文散文 ≈4、数字/代码 ≈3(最后一类会低估,漏网
   // 请求由上游秒级错误帧兜底)。旧的统一 bytes/3.5 对中文高估约 37%(把
   // 本可成功的中文长上下文提前 413)、对英文低估约 12%
+  // pessimistic=true 时 ASCII 按 3(实测下界)取值:用于"服务器繁忙"错误帧的
+  // 复判——上游把上下文超限也报成"繁忙"(2026-09-10 实测复现),按悲观口径
+  // 复算能把它和真过载区分开,给客户端正确的处置指引。注意:悲观只调 ASCII
+  // 一类,中文密集请求的 413 复判不保证覆盖(真实 CJK 密度可能低于 4.8),
+  // 这类漏网仍落回 429 原文
   let ascii = 0, multibyte = 0;
   for (let i = 0; i < bodyBuffer.length; i++) {
     if (bodyBuffer[i] < 0x80) ascii++; else multibyte++;
   }
-  return Math.round(ascii / 4 + multibyte / 4.8);
+  return Math.round(ascii / (pessimistic ? 3 : 4) + multibyte / 4.8);
+}
+
+// "服务器繁忙"错误帧的复判参数(translateUpstreamError 消费):悲观口径估算
+// + 本请求 max_tokens + 上限。流式/聚合两条错误路径共用
+function busyHint(ctx, payload, config) {
+  return {
+    estHigh: estimateTokens(ctx.rawBody, true),
+    tokenBudget: typeof payload.max_tokens === 'number' ? payload.max_tokens : 0,
+    contextWindow: config.contextWindow,
+  };
 }
 
 function createProxyService(deps) {
@@ -215,7 +230,7 @@ function createProxyService(deps) {
     if (result.type === 'upstream-error') {
       if (!ctx.sseHeadersSent()) {
         ctx.dumpFailed();
-        const mapped = translateUpstreamError(result.body, result.raw, result.status);
+        const mapped = translateUpstreamError(result.body, result.raw, result.status, busyHint(ctx, payload, config));
         logReq(req, mapped.http, started, size,
           `upstream-err raw=${String(result.raw || '').slice(0, 150).replace(/\s+/g, ' ')}`);
         return ctx.sendError(mapped.http, mapped.message, 'upstream_error', extraHeaders);
@@ -326,7 +341,7 @@ function createProxyService(deps) {
     }
     if (result.type === 'upstream-error') {
       ctx.dumpFailed();
-      const mapped = translateUpstreamError(result.body, result.raw, result.status);
+      const mapped = translateUpstreamError(result.body, result.raw, result.status, busyHint(ctx, payload, config));
       logReq(req, mapped.http, started, size,
         `upstream-err raw=${String(result.raw || '').slice(0, 150).replace(/\s+/g, ' ')}`);
       return ctx.sendError(mapped.http, mapped.message, 'upstream_error', extraHeaders);
@@ -359,4 +374,5 @@ function createProxyService(deps) {
   return { handleRequest, logReq, usageNote };
 }
 
-module.exports = { createProxyService };
+// estimateTokens 一并导出:纯函数,测试直接钉死两类口径的校准数值
+module.exports = { createProxyService, estimateTokens };

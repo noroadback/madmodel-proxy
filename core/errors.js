@@ -5,7 +5,7 @@
 
 'use strict';
 
-function translateUpstreamError(bodyObj, raw, status) {
+function translateUpstreamError(bodyObj, raw, status, busyHint) {
   if (status === 404) {
     return { http: 502, message: '上游返回 404:端点可能已变更' };
   }
@@ -23,6 +23,16 @@ function translateUpstreamError(bodyObj, raw, status) {
     return { http: 429, message: `上游拒绝:${detail || '(上游未提供详情)'}(可能是上下文超限≈256K、请求体超限 1MB 或服务繁忙)` };
   }
   if (typeof bodyObj?.errorMessage === 'string' && /繁忙/.test(bodyObj.errorMessage)) {
+    // 上游对上下文超限的请求也返回同一句"服务器繁忙"(2026-09-10 实测复现:
+    // 代码密集长会话被 413 预检门漏放——真实分词密度高于估算口径——上游秒拒,
+    // 429+"稍后再试"诱导客户端无退路地循环重试)。busyHint 由调用方按悲观
+    // 口径(ASCII/3,实测分词密度下界)复算提供:连下界估算+max_tokens 都超
+    // 上限时改判 413,给客户端"新开会话/压缩 history"的正确处置;短小请求
+    // 则保持 429 等待语义。误判代价不对称:把真过载标成 413,用户多压缩一次
+    // 上下文;把超限标成 429,用户死等重试永不成功
+    if (busyHint && busyHint.estHigh + busyHint.tokenBudget > busyHint.contextWindow) {
+      return { http: 413, message: `疑似上下文超限:上游对超限请求也返回"服务器繁忙"(实测形态),本请求按悲观口径估算 ${busyHint.estHigh} + max_tokens ${busyHint.tokenBudget} 已超上限 ${busyHint.contextWindow}。请新开会话或压缩 history 后重试;若小请求也报此错,才是上游真的繁忙` };
+    }
     return { http: 429, message: `上游繁忙(SSE 内嵌错误): ${bodyObj.errorMessage}` };
   }
   if (detail) return { http: 502, message: `上游拒绝请求: ${String(detail).slice(0, 300)}` };

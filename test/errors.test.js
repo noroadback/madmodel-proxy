@@ -41,6 +41,51 @@ test('映射: SSE 内嵌 errorMessage 含"繁忙" → 429 原文', () => {
   assert.ok(m.message.includes('服务器繁忙'));
 });
 
+// ---- "繁忙"复判:上游对上下文超限也报"繁忙"(2026-09-10 实测),按悲观口径
+// 估算+max_tokens 复算,超限改判 413 给出正确处置 ----
+const BUSY = { errorMessage: '服务器繁忙，请稍后再试' };
+const hintOver = { estHigh: 240000, tokenBudget: 65536, contextWindow: 262144 };
+
+test('复判: 无 busyHint 保持 429(调用方未提供时不改语义)', () => {
+  const m = translateUpstreamError(BUSY, '', 200);
+  assert.strictEqual(m.http, 429);
+});
+
+test('复判: 悲观估算+max_tokens 超上限 → 413 疑似上下文超限', () => {
+  const m = translateUpstreamError(BUSY, '', 200, hintOver);
+  assert.strictEqual(m.http, 413);
+  assert.ok(m.message.includes('上下文超限'));
+  assert.ok(m.message.includes('240000'));
+});
+
+test('复判: 估算未超上限(短小请求) → 保持 429 真繁忙', () => {
+  const m = translateUpstreamError(BUSY, '', 200, { ...hintOver, estHigh: 1000 });
+  assert.strictEqual(m.http, 429);
+  assert.ok(m.message.includes('服务器繁忙'));
+});
+
+test('复判: max_tokens 缺省按 0 计,不算超限', () => {
+  const m = translateUpstreamError(BUSY, '', 200, { ...hintOver, tokenBudget: 0 });
+  assert.strictEqual(m.http, 429);
+});
+
+test('复判: 恰等于上限不算超限(上游 > 才拒)', () => {
+  const m = translateUpstreamError(BUSY, '', 200, { estHigh: 196608, tokenBudget: 65536, contextWindow: 262144 });
+  assert.strictEqual(m.http, 429);
+});
+
+// ---- estimateTokens 两类口径(纯函数,钉死校准数值) ----
+const { estimateTokens } = require('../core/proxy-service');
+
+test('估算: ASCII 按 4(常规)/3(悲观),多字节恒按 4.8', () => {
+  const ascii = Buffer.from('a'.repeat(400)); // 400 字节纯 ASCII
+  assert.strictEqual(estimateTokens(ascii), 100);
+  assert.strictEqual(estimateTokens(ascii, true), 133); // Math.round(400/3)
+  const zh = Buffer.from('中'.repeat(48)); // 144 字节(3 字节/字)纯多字节
+  assert.strictEqual(estimateTokens(zh), 30);
+  assert.strictEqual(estimateTokens(zh, true), 30); // 悲观只调 ASCII 一类
+});
+
 test('映射: 有 detail 无结构化状态 → 502 上游拒绝请求', () => {
   const m = translateUpstreamError({ message: '某错误' }, '', 400);
   assert.strictEqual(m.http, 502);
