@@ -24,6 +24,7 @@ const config = require('./config');
 const { createUpstreamClient } = require('./core/upstream-client');
 const { createProxyService } = require('./core/proxy-service');
 const { createHttpServer, createTokenCache, createTokenState } = require('./adapters/http-server');
+const { getTokenizer } = require('./core/tokenizer');
 const paths = require('./platform/paths');
 
 // token 读取/缓存与状态判定先于 service 与 HTTP 层独立创建,再分别注入:
@@ -37,6 +38,10 @@ const service = createProxyService({
   upstreamClient: createUpstreamClient(config),
 });
 const httpServer = createHttpServer({ config, service, getToken });
+
+// 预检门用本地分词器精确计 token:7.8MB 词表一次性解析(约 300ms)落在
+// 启动期,首个请求不再付这笔
+getTokenizer();
 
 process.on('unhandledRejection', e => {
   // 长驻进程:记日志不退出,单次请求的异常不应拖垮整个代理。

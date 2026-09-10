@@ -4,7 +4,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
-const { parseJsonBody, normalizePayload } = require('../core/payload');
+const { parseJsonBody, normalizePayload, fitTokenBudget } = require('../core/payload');
 
 const MODEL = 'DeepSeek-V4-Flash-0731';
 
@@ -159,4 +159,51 @@ test('思考方言: chat_template_kwargs 为数组时整体替换', () => {
   const p = { model: MODEL, thinking: false, chat_template_kwargs: [1, 2], messages: [] };
   normalizePayload(p, MODEL);
   assert.deepStrictEqual(p.chat_template_kwargs, { thinking: false });
+});
+
+// ---- fitTokenBudget:预检门的精确收缩(上游规则 prompt+max_tokens ≤ 262,144) ----
+test('预算适配: 未超限不改不注记', () => {
+  const p = { max_tokens: 4096 };
+  const r = fitTokenBudget(100000, p, 262144);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.note, '');
+  assert.strictEqual(p.max_tokens, 4096);
+});
+
+test('预算适配: 超限收缩到剩余空间', () => {
+  const p = { max_tokens: 65536 };
+  const r = fitTokenBudget(230000, p, 262144);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(p.max_tokens, 32144);
+  assert.ok(r.note.includes('32144'));
+});
+
+test('预算适配: 恰等于上限不动', () => {
+  const p = { max_tokens: 65536 };
+  const r = fitTokenBudget(196608, p, 262144);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(p.max_tokens, 65536);
+  assert.strictEqual(r.note, '');
+});
+
+test('预算适配: 剩余空间 <512 判 413(prompt 本身超限)', () => {
+  const p = { max_tokens: 65536 };
+  const r = fitTokenBudget(262000, p, 262144);
+  assert.strictEqual(r.ok, false);
+  assert.ok(r.message.includes('262000'));
+  assert.ok(r.message.includes('512'));
+});
+
+test('预算适配: max_tokens 缺省且 prompt 未超限 → 不注入不收缩', () => {
+  const p = {};
+  const r = fitTokenBudget(200000, p, 262144);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.note, '');
+  assert.strictEqual(p.max_tokens, undefined);
+});
+
+test('预算适配: max_tokens 缺省但 prompt 本身超限 → 413', () => {
+  const p = {};
+  const r = fitTokenBudget(263000, p, 262144);
+  assert.strictEqual(r.ok, false);
 });

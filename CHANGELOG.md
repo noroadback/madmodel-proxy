@@ -2,6 +2,19 @@
 
 本文件记录各版本的行为变化与关键取舍。日期为实测或落地日期。
 
+## 1.6.0
+
+### 本地精确分词 + max_tokens 预检收缩（2026-09-10）
+
+**背景**：1.5.2 修复了"上游把上下文超限报成'服务器繁忙'"的误译，但预检门仍依赖字节估算器（±15% 误差），且超限请求只能 413 拒绝。当天实测把两件事钉死：上游规则为 `prompt_tokens + max_tokens ≤ 262,144`（逐 token 精确，边界随 prompt 平移，无独立 max_tokens 上限）；学校 V4-Flash 沿用 DeepSeek 官方公开 V3 分词器（HuggingFace，MIT）——本地复刻计 token 与上游 `usage.prompt_tokens` 在 24 万 token 级 payload 上逐个吻合（600KB 代码密集：oracle 245,785 vs 本地 245,787，差 2 为模板保守偏置）。
+
+**变化**：
+
+- 新增 `core/tokenizer.js`（零依赖 byte-level BPE，vendor/deepseek-tokenizer.json 7.8MB，启动一次性加载约 300ms）与两级缓存（piece/文本）：增量会话只有新增内容参与计算，700KB 全量约 140ms。chat 模板开销按 oracle 校准建模（纯文本 `2+2n` 恒高估 0~2；tool_call +24、tool 结果 +18、tools 定义区 236+逐 tool JSON 序列化计数，全部实测校准且恒 ≥ oracle 的安全方向；tool_call_id 不渲染进 prompt）。
+- 预检门改为精确判定：`prompt+max_tokens` 超限时**不再拒绝**，把 `max_tokens` 收缩到剩余空间（`262,144 − prompt`）再发——max_tokens 是输出上限而非目标，收缩对绝大多数请求无感，代价仅高位长输出需续写（`finish_reason: length`）。剩余空间 <512 才 413（prompt 本身超限，消息带精确 token 数）。`max_tokens` 缺省时仅在 prompt 本身超限才拒绝。估算器（`estimateTokens` 及其双口径）删除。
+- "繁忙"复判（1.5.2）保留为窄覆盖的防御性兜底，参数改为精确口径：本地 `promptTokens + 实际发出的 max_tokens` 达上限才改判 413。预检门精确化后其覆盖面收窄至"max_tokens 缺省且 prompt 恰达上限"的退化边界（防不了上游漂移——本地与预检用同一套计数），主要防线已移交预检门的精确收缩。
+- 端到端实测：600KB+65536 的请求（此前 413/更早是误导性 429）现收缩到 16,357 后 200 放行，上游确认 prompt_tokens=245,785；700KB（286,737 tokens，prompt 自身超限）0.1s 精确 413；小请求不受影响。测试 76 项全绿，其中分词器 15 项直接钉 oracle 验证值（上游换分词器/改模板时会红，以 `usage.prompt_tokens` 重新校准）。
+
 ## 1.5.2
 
 ### "服务器繁忙"错误帧的上下文超限复判（2026-09-10）

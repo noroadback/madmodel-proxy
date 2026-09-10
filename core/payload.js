@@ -64,7 +64,8 @@ function normalizePayload(payload, model) {
   // 上游校验 prompt+max_tokens ≤ 262,144:按官方目录自动配置的客户端(如
   // ZCode 匹配 deepseek-v4-flash 的 384K 输出规格)会发超大 max_tokens,被
   // 上游以"服务器繁忙"错误帧秒拒,流式形态即空流。压到 65536(参数实测
-  // 接受,模型自然停止远早于此);prompt 侧的联合校验在 proxy-service 早退
+  // 接受,模型自然停止远早于此);prompt 侧的联合校验与收缩在 proxy-service
+  // 预检门(fitTokenBudget)
   if (typeof payload.max_tokens === 'number' && payload.max_tokens > 65536) {
     payload.max_tokens = 65536;
     applied.push(`max_tokens→65536`);
@@ -85,4 +86,24 @@ function normalizePayload(payload, model) {
   return applied;
 }
 
-module.exports = { parseJsonBody, normalizePayload };
+// 上游按 prompt_tokens+max_tokens ≤ 262,144 逐 token 校验(2026-09-10 实测,
+// 边界随 prompt 精确平移)。预检超限时不拒绝:把 max_tokens 收到剩余空间
+// 再发——max_tokens 是输出上限而非目标,收缩对绝大多数请求无感,代价仅
+// 高位长输出需续写(finish_reason:length)。剩余空间放不下最小输出预算
+// (512)才判 413:prompt 本身超限。max_tokens 缺省时仅在 prompt 本身超限
+// 才拒绝(上游缺省输出预算未知,不注入不收缩,交上游仲裁)
+function fitTokenBudget(promptTokens, payload, contextWindow) {
+  const budget = typeof payload.max_tokens === 'number' ? payload.max_tokens : 0;
+  if (promptTokens + budget <= contextWindow) return { ok: true, note: '' };
+  const room = contextWindow - promptTokens;
+  if (room < 512) {
+    return {
+      ok: false,
+      message: `prompt ${promptTokens} tokens 已达上游 ${contextWindow} tokens 上下文上限,连最小输出预算 512 都放不下。请新开会话或在客户端压缩 history 后重试。`,
+    };
+  }
+  payload.max_tokens = room;
+  return { ok: true, note: ` norm[max_tokens→${room} 预检收缩]` };
+}
+
+module.exports = { parseJsonBody, normalizePayload, fitTokenBudget };

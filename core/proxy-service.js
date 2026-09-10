@@ -11,9 +11,10 @@
 
 'use strict';
 
-const { normalizePayload, parseJsonBody } = require('./payload');
+const { normalizePayload, parseJsonBody, fitTokenBudget } = require('./payload');
 const { translateUpstreamError, describeFailedStream } = require('./errors');
 const { createAggregator } = require('./completion-aggregator');
+const { getTokenizer } = require('./tokenizer');
 
 // 日志时间戳。固定 HH:MM:SS 而非 toLocaleTimeString:后者随机器 locale 变形
 // (12 小时制/中文"下午"),日志被贴进 issue 时不可比对
@@ -21,28 +22,15 @@ function stamp() {
   return new Date().toTimeString().slice(0, 8);
 }
 
-function estimateTokens(bodyBuffer, pessimistic) {
-  // 无分词器的粗估,按字节类别分开计量(2026-09-09 实测 DeepSeek V4 分词器):
-  // 中文 ≈4.8 字节/token、英文散文 ≈4、数字/代码 ≈3(最后一类会低估,漏网
-  // 请求由上游秒级错误帧兜底)。旧的统一 bytes/3.5 对中文高估约 37%(把
-  // 本可成功的中文长上下文提前 413)、对英文低估约 12%
-  // pessimistic=true 时 ASCII 按 3(实测下界)取值:用于"服务器繁忙"错误帧的
-  // 复判——上游把上下文超限也报成"繁忙"(2026-09-10 实测复现),按悲观口径
-  // 复算能把它和真过载区分开,给客户端正确的处置指引。注意:悲观只调 ASCII
-  // 一类,中文密集请求的 413 复判不保证覆盖(真实 CJK 密度可能低于 4.8),
-  // 这类漏网仍落回 429 原文
-  let ascii = 0, multibyte = 0;
-  for (let i = 0; i < bodyBuffer.length; i++) {
-    if (bodyBuffer[i] < 0x80) ascii++; else multibyte++;
-  }
-  return Math.round(ascii / (pessimistic ? 3 : 4) + multibyte / 4.8);
-}
-
-// "服务器繁忙"错误帧的复判参数(translateUpstreamError 消费):悲观口径估算
-// + 本请求 max_tokens + 上限。流式/聚合两条错误路径共用
-function busyHint(ctx, payload, config) {
+// "服务器繁忙"错误帧的复判参数(translateUpstreamError 消费):本地精确
+// prompt token 数 + 实际发出的 max_tokens + 上限。流式/聚合两条错误路径共用。
+// 覆盖面很窄(防御性保留,不是主要防线):通过预检门的请求按构造 prompt+预算
+// ≤ 上限,413 改判只在 max_tokens 缺省且 prompt 恰达上限的退化边界可达;
+// 它防不了上游漂移——漂移时本地与预检用同一套计数,同样低估。主要防线是
+// 预检门的精确收缩
+function busyHint(payload, config) {
   return {
-    estHigh: estimateTokens(ctx.rawBody, true),
+    promptTokens: getTokenizer().countPromptTokens(payload),
     tokenBudget: typeof payload.max_tokens === 'number' ? payload.max_tokens : 0,
     contextWindow: config.contextWindow,
   };
@@ -167,17 +155,21 @@ function createProxyService(deps) {
     }
     const { payload, clientWantsStream, normNote } = prepared;
 
-    // ---- 上游前的廉价早退:上游的实际上下文校验是 prompt+max_tokens ≤
-    // 262,144(2026-09-09 实测),此处按同一口径拦截。估算按内容类别有
-    // ±15% 量级误差,漏网的由上游秒级错误帧兜底(诚实失败,晚一秒)。
-    // max_tokens 缺省时按 0 计(上游对缺省值的行为未知,交给上游仲裁)
-    const estTokens = estimateTokens(ctx.rawBody);
-    const tokenBudget = typeof payload.max_tokens === 'number' ? payload.max_tokens : 0;
-    if (estTokens + tokenBudget > config.contextWindow) {
-      logReq(ctx.req, 413, ctx.started, ctx.size, `token-est=${estTokens}+${tokenBudget}`);
-      return ctx.sendError(413,
-        `prompt 估算 ${estTokens} + max_tokens ${tokenBudget} 超过上游 262,144 tokens 上下文上限。请在客户端压缩上下文(history/truncate)后重试。`);
+    // ---- 上游前的精确预检(1.6.0 起):上游按 prompt_tokens+max_tokens ≤
+    // 262,144 逐 token 校验(2026-09-10 实测,边界随 prompt 精确平移),本地
+    // 分词器与上游逐 token 一致(core/tokenizer.js)。超限不再拒绝:把
+    // max_tokens 收到剩余空间再发——max_tokens 是输出上限而非目标,收缩对
+    // 绝大多数请求无感,代价仅高位长输出需续写(finish_reason:length)。
+    // 剩余空间放不下最小输出预算(512)才 413:prompt 本身超限。
+    // max_tokens 缺省时仅在 prompt 本身超限才 413(上游缺省输出预算未知,
+    // 不注入不收缩,交上游仲裁)
+    const promptTokens = getTokenizer().countPromptTokens(payload);
+    const fit = fitTokenBudget(promptTokens, payload, config.contextWindow);
+    if (!fit.ok) {
+      logReq(ctx.req, 413, ctx.started, ctx.size, `tokens=${promptTokens}`);
+      return ctx.sendError(413, fit.message);
     }
+    const gateNote = normNote + fit.note;
 
     // ---- 进程保护硬上限:非常规业务限流——多子代理编排(几十路并发)是合法
     // 负载,64 远在其上;上限防的是失控客户端紧循环把进程内存/连接拖垮
@@ -200,8 +192,8 @@ function createProxyService(deps) {
     const ac = ctx.abortController;
     inflight++;
     try {
-      if (clientWantsStream) return await streamPassthrough(ctx, payload, auth.token, extraHeaders, normNote, ac);
-      return await aggregateResponse(ctx, payload, auth.token, extraHeaders, normNote, ac);
+      if (clientWantsStream) return await streamPassthrough(ctx, payload, auth.token, extraHeaders, gateNote, ac);
+      return await aggregateResponse(ctx, payload, auth.token, extraHeaders, gateNote, ac);
     } finally {
       // 唯一释放路径:早退(400/413/429)发生在 inflight++ 之前,不经过这里
       inflight--;
@@ -230,7 +222,7 @@ function createProxyService(deps) {
     if (result.type === 'upstream-error') {
       if (!ctx.sseHeadersSent()) {
         ctx.dumpFailed();
-        const mapped = translateUpstreamError(result.body, result.raw, result.status, busyHint(ctx, payload, config));
+        const mapped = translateUpstreamError(result.body, result.raw, result.status, busyHint(payload, config));
         logReq(req, mapped.http, started, size,
           `upstream-err raw=${String(result.raw || '').slice(0, 150).replace(/\s+/g, ' ')}`);
         return ctx.sendError(mapped.http, mapped.message, 'upstream_error', extraHeaders);
@@ -341,7 +333,7 @@ function createProxyService(deps) {
     }
     if (result.type === 'upstream-error') {
       ctx.dumpFailed();
-      const mapped = translateUpstreamError(result.body, result.raw, result.status, busyHint(ctx, payload, config));
+      const mapped = translateUpstreamError(result.body, result.raw, result.status, busyHint(payload, config));
       logReq(req, mapped.http, started, size,
         `upstream-err raw=${String(result.raw || '').slice(0, 150).replace(/\s+/g, ' ')}`);
       return ctx.sendError(mapped.http, mapped.message, 'upstream_error', extraHeaders);
@@ -374,5 +366,4 @@ function createProxyService(deps) {
   return { handleRequest, logReq, usageNote };
 }
 
-// estimateTokens 一并导出:纯函数,测试直接钉死两类口径的校准数值
-module.exports = { createProxyService, estimateTokens };
+module.exports = { createProxyService };
