@@ -73,7 +73,7 @@ function createProxyService(deps) {
     if (ts.code === 'token-expired') {
       return { error: { status: 401, message: 'token 已过期,等待 watch 守护续期。请确认: node refresh-token.js watch 在运行', note: 'token-expired', type: 'auth_error' } };
     }
-    return { token: ts.token, msLeft: ts.msLeft };
+    return { token: ts.token, msLeft: ts.msLeft, cookie: ts.cookie };
   }
 
   // 解析与归一化:返回 {payload, clientWantsStream, normNote} 或带 note 的 400
@@ -192,8 +192,8 @@ function createProxyService(deps) {
     const ac = ctx.abortController;
     inflight++;
     try {
-      if (clientWantsStream) return await streamPassthrough(ctx, payload, auth.token, extraHeaders, gateNote, ac);
-      return await aggregateResponse(ctx, payload, auth.token, extraHeaders, gateNote, ac);
+      if (clientWantsStream) return await streamPassthrough(ctx, payload, auth, extraHeaders, gateNote, ac);
+      return await aggregateResponse(ctx, payload, auth, extraHeaders, gateNote, ac);
     } finally {
       // 唯一释放路径:早退(400/413/429)发生在 inflight++ 之前,不经过这里
       inflight--;
@@ -201,10 +201,11 @@ function createProxyService(deps) {
   }
 
   // ---- 流式透传 ----
-  async function streamPassthrough(ctx, payload, token, extraHeaders, normNote, ac) {
+  // auth: { token, cookie } —— cookie 为 WebVPN 隧道会话凭证,可缺省
+  async function streamPassthrough(ctx, payload, auth, extraHeaders, normNote, ac) {
     const { req, started, size } = ctx;
     const result = await upstreamClient.request({
-      payload, token, signal: ac.signal,
+      payload, token: auth.token, cookie: auth.cookie, signal: ac.signal,
       onChunk: async (obj) => {
         // SSE 头延迟到首帧数据再发:上游"开流即报错"(SSE 内嵌 errorMessage,
         // 如超上下文/繁忙)时头尚未发出,upstream-error 分支能以真实状态码
@@ -302,7 +303,7 @@ function createProxyService(deps) {
   }
 
   // ---- 非流式:聚合 SSE ----
-  async function aggregateResponse(ctx, payload, token, extraHeaders, normNote, ac) {
+  async function aggregateResponse(ctx, payload, auth, extraHeaders, normNote, ac) {
     const { req, started, size } = ctx;
     const agg = createAggregator(config.model);
     let chunkCount = 0;
@@ -315,7 +316,7 @@ function createProxyService(deps) {
       }
     }, config.nonstreamTotalTimeout);
     const result = await upstreamClient.request({
-      payload, token, signal: ac.signal,
+      payload, token: auth.token, cookie: auth.cookie, signal: ac.signal,
       onChunk: obj => {
         chunkCount++;
         agg.feed(obj);

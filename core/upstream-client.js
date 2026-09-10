@@ -54,7 +54,7 @@ function createUpstreamClient(config) {
     upstreamJsonBodyLimit, upstreamSseTotalLimit, sseLineLimit,
   } = config;
 
-  function request({ payload, token, signal, onChunk, onOpen }) {
+  function request({ payload, token, cookie, signal, onChunk, onOpen }) {
     return new Promise((resolve) => {
       // 单一 AbortController:外部 signal(客户端断开/聚合超时)与 header 超时
       // 都汇入这里;idle/total 超时经 cancelBody 令读取循环结束。
@@ -110,6 +110,10 @@ function createUpstreamClient(config) {
           Authorization: `Bearer ${token}`,
           Accept: 'text/event-stream',
         };
+        // WebVPN 隧道会话凭证:上游走隧道前缀时必带,否则隧道把请求当未登录
+        // 踢回登录页(表现为 upstream-error 502/307)。直连上游的老配置不带
+        // 此头不受影响
+        if (cookie) reqHeaders.Cookie = cookie;
 
         const up = await fetch(upstream, {
           method: 'POST',

@@ -5,7 +5,8 @@
 // 运行时依赖全部为 Node 原生:
 //   - fetch(redirect:'manual') + getSetCookie() 逐跳管理 cookie
 //   - sm2.js(sm-crypto v0.3.13,vendored)直接 require
-// 输出:{ token, expiresAt } —— token 对直连端点 madmodel.cs.tsinghua.edu.cn 有效。
+// 输出:{ token, expiresAt, cookie } —— token 对 madmodel 应用有效(2026-09-10 起
+// 直连域名被 TsinghuaLB oauth 门禁拦截,上游调用应走 WebVPN 隧道并携带 cookie)。
 
 'use strict';
 
@@ -713,6 +714,10 @@ class MadmodelAuthClient {
     return {
       token: token.trim(),
       expiresAt: jwtExpiresAt(token.trim()),
+      // WebVPN 隧道会话 cookie:上游走 WebVPN 前缀时必须随请求回传(不带会被
+      // 隧道踢回登录页)。认证链结束时 jar 里 webvpn 域的 cookie 即所需全集,
+      // 与 token 同生命周期(每次续期整链重跑,cookie 随之更新)。
+      cookie: this.jar.headerFor(WEBVPN_PREFIX + '/'),
     };
   }
 }
@@ -732,6 +737,32 @@ function generateFingerprint() {
   return crypto.randomBytes(16).toString('hex');
 }
 
+// 探活 HTTP 状态码 → verdict 的纯判定(独立导出便于离线测试;网络层错误由
+// 调用方在 catch 里归为 'network',本函数只判 HTTP 状态)。隧道对未认证
+// 会话的固定形态是 3xx 跳登录页(实测 302 → /login);2xx 说明会话有效;
+// 4xx/5xx 也意味着请求已穿过隧道到达应用(会话有效,失败在应用侧)。
+function classifyProbeStatus(status) {
+  if (status >= 200 && status < 300) return 'ok';
+  if (status >= 300 && status < 400) return 'invalid';
+  return 'ok';
+}
+
+// WebVPN 隧道会话探活:带 cookie GET 一个隧道内地址。请求本身重置隧道空闲
+// 计时;返回 verdict 供 watch 区分"会话失效要重签凭据"与"网络抖动不动凭据"。
+async function probeWebvpnSession(url, cookie) {
+  try {
+    const res = await fetch(url, {
+      headers: cookie ? { Cookie: cookie } : {},
+      redirect: 'manual',
+      signal: AbortSignal.timeout(15e3),
+    });
+    try { res.body?.cancel(); } catch (e) { /* 已结束的 body 重复取消 */ }
+    return classifyProbeStatus(res.status);
+  } catch (e) {
+    return 'network';
+  }
+}
+
 module.exports = {
   MadmodelAuthClient,
   CookieJar,
@@ -739,6 +770,8 @@ module.exports = {
   generateFingerprint,
   AuthError,
   requestWithRedirects,
+  classifyProbeStatus,
+  probeWebvpnSession,
   // 以下为认证链中出错概率最高的纯判定函数(响应体解码/URL 解析/重定向白名单)。
   // 认证链无法端到端离线验证,单独导出便于本地复现与审查
   decodeBody,
