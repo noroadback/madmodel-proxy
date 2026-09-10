@@ -40,7 +40,11 @@ function createTokenCache(config) {
   return function getToken() {
     try {
       const stat = fs.statSync(config.tokenFile);
-      if (cache.data && stat.mtimeMs === cache.mtime) {
+      // 仅以 mtime 为缓存键(含 null 负结果):token.json 存在但密文永久
+      // 解不开(换账户/损坏)时,每个请求重走 stat+read+DPAPI(同步阻塞
+      // 100-300ms)只为再得到一次 null——负结果同样按 mtime 缓存,用户
+      // 重新 login 原子替换文件、mtime 变化自然失效
+      if (stat.mtimeMs === cache.mtime) {
         return cache.data;
       }
       let data;

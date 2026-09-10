@@ -45,6 +45,14 @@ function normalizePayload(payload, model) {
   // 关闭思考的方言先判定(判定字段随后会被剥离)
   const wantsNoThinking = payload.reasoning_effort === 'none' ||
     payload.thinking === false || payload.thinking?.type === 'disabled';
+  // 新版 OpenAI 客户端(SDK v5+/部分智能体框架)用 max_completion_tokens
+  // 替代 max_tokens——两者同义,统一收敛到 max_tokens 再做区间约束,否则
+  // 384K 规格和 16 预算都能绕过下面的上下限。两个键并存时以新键为准
+  if (typeof payload.max_completion_tokens === 'number') {
+    payload.max_tokens = payload.max_completion_tokens;
+    delete payload.max_completion_tokens;
+    applied.push('max_completion_tokens→max_tokens');
+  }
   // 推理模型在极小 max_tokens 下会把预算全部耗在思考上,content 恒为空——
   // 客户端的连通性探测常发 16/64 这类小预算(ZCode 实测 max_tokens:16),
   // 会被误判为"模型空响应"。仅在思考开启时抬到下限;思考关闭的请求维持

@@ -12,6 +12,14 @@ test('映射: 404 → 502 端点变更', () => {
   assert.ok(m.message.includes('端点可能已变更'));
 });
 
+test('映射: HTTP 401/403 → 401 认证失败(与 10003 同语义)', () => {
+  for (const status of [401, 403]) {
+    const m = translateUpstreamError(null, 'whatever', status);
+    assert.strictEqual(m.http, 401, String(status));
+    assert.ok(m.message.includes('watch 守护'));
+  }
+});
+
 test('映射: status 10003 → 401 认证失败', () => {
   const m = translateUpstreamError({ status: 10003 }, '', 200);
   assert.strictEqual(m.http, 401);

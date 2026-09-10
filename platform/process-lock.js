@@ -21,7 +21,10 @@ function pidOf(content) {
 }
 
 function isAlive(pid) {
-  try { process.kill(pid, 0); return true; } catch (e) { return false; }
+  // EPERM = 进程存在但无权发信号(他人/SYSTEM 进程):按存活处理——
+  // 归入死进程会打破文件头"fail-safe 拒绝双跑"的承诺(PID 被系统进程
+  // 复用时误判可接管)
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 }
 
 function acquirePidLock(file) {

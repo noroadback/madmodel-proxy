@@ -20,6 +20,7 @@ let shuttingDown = false;
 // 实例在运行")不重启
 const crashStreaks = new Map();
 const givenUp = new Set();
+let pendingRestarts = 0; // 已排未触发的重启定时器数(spawn 失败收尾要避让它们)
 
 function launch(tag, script, args) {
   const startedAt = Date.now();
@@ -43,6 +44,13 @@ function launch(tag, script, args) {
   child.on('error', (e) => {
     console.log(`[${tag}] === 子进程错误: ${e.message} ===`);
     children.delete(child);
+    // spawn 失败只发 'error' 不发 'exit'(Node 文档):不排重启,但也不能
+    // 让窗口无子进程无定时器地空挂。其他 tag 若有挂起的重启定时器则避让
+    // ——那是一次本可自动恢复的恢复
+    if (!children.size && pendingRestarts === 0) {
+      console.log('\n没有存活/待重启的子进程,窗口可关闭;修复后重开 start.cmd。');
+      process.exit(1);
+    }
   });
   child.on('exit', (code) => {
     children.delete(child);
@@ -70,7 +78,8 @@ function launch(tag, script, args) {
     }
     // intentional(如 watch 撞单实例锁)与已放弃的不排重启,其余 5 秒后重启
     if (!intentional && !givenUp.has(tag)) {
-      setTimeout(() => { if (!shuttingDown) launch(tag, script, args); }, 5000);
+      pendingRestarts++;
+      setTimeout(() => { pendingRestarts--; if (!shuttingDown) launch(tag, script, args); }, 5000);
     }
     // 没有存活/待重启的子进程时收尾(有定时器待重启则不退)
     if (!children.size && (intentional || givenUp.has(tag))) {

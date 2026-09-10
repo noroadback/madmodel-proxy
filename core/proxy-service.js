@@ -246,9 +246,37 @@ function createProxyService(deps) {
       return failRequest(ctx, mapped);
     }
     if (result.type === 'completion') {
-      // 上游以 JSON 给了完整 completion:补成 SSE 形态交付,不丢这次生成
+      // 上游对 stream:true 异常地回完整 JSON completion:重组为 delta 形态的
+      // chunk 交付——OpenAI 流式规范没有 message 形态的 chunk,原样透传会被
+      // 严格 SDK 当空内容。id/created/model/usage 原样保留
+      const m = result.body.choices?.[0]?.message || {};
+      const chunk = {
+        id: result.body.id,
+        object: 'chat.completion.chunk',
+        created: result.body.created,
+        model: result.body.model,
+        choices: [{
+          index: 0,
+          delta: {
+            role: 'assistant',
+            ...(m.content != null ? { content: m.content } : {}),
+            ...(m.reasoning_content != null ? { reasoning_content: m.reasoning_content } : {}),
+            ...(Array.isArray(m.tool_calls) ? {
+              tool_calls: m.tool_calls.map((tc, i) => ({
+                index: i, id: tc.id, type: tc.type, function: tc.function,
+              })),
+            } : {}),
+          },
+          finish_reason: result.body.choices?.[0]?.finish_reason ?? 'stop',
+        }],
+      };
       ctx.ensureSseHeaders();
-      ctx.writeSseLine(`data: ${JSON.stringify(result.body)}\n\n`);
+      ctx.writeSseLine(`data: ${JSON.stringify(chunk)}\n\n`);
+      if (result.body.usage) {
+        ctx.writeSseLine(`data: ${JSON.stringify({
+          id: result.body.id, object: 'chat.completion.chunk', choices: [], usage: result.body.usage,
+        })}\n\n`);
+      }
       ctx.writeSseLine('data: [DONE]\n\n');
       ctx.endResponse();
       logReq(req, 200, started, size, `stream,json-fallback${usageNote(result.body?.usage)}${normNote}`);

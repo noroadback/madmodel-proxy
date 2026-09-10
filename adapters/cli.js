@@ -12,7 +12,7 @@ const { login, refresh, watch } = require('../auth-service');
 const credentials = require('../platform/credentials');
 const processLock = require('../platform/process-lock');
 const config = require('../config');
-const { WATCH_LOCK } = require('../platform/paths');
+const { WATCH_LOCK, display } = require('../platform/paths');
 
 async function promptCredentials() {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -58,7 +58,9 @@ async function promptCredentials() {
     // 管道环境:输入内容不经过终端,无回显问题。readline 预读缓冲了整个
     // stdin,必须在 readline 上按行读(绕开它的裸监听拿不到被缓冲的数据,
     // 且 rl.close 在管道模式会直接结束输入流——曾导致管道 login 挂死)
-    password = (await ask('统一认证密码(输入不显示): ')).trim();
+    // 管道输入在 Windows 下常带 CRLF 的 \r;只剥 \r 不 trim——首尾空格是
+    // 合法密码字符,与 TTY 路径(原样保留)保持一致
+    password = (await ask('统一认证密码(输入不显示): ')).replace(/\r$/, '');
   }
   rl.close(); // 凭据都拿到后再释放 stdin
   if (!password) { console.error('密码不能为空'); process.exit(1); }
@@ -70,8 +72,8 @@ async function cmdLogin() {
   console.log('\n开始登录并获取 token…');
   const { expiresAt, fingerPrint, tokenFile, credsFile } = await login({ username, password });
   console.log(`✅ token 已获取,有效期至 ${new Date(expiresAt).toLocaleString()}`);
-  console.log(`已写入 ${tokenFile}`);
-  console.log(`凭据已保存到 ${credsFile}(密码仅当前 Windows 账户可解密)`);
+  console.log(`已写入 ${display(tokenFile)}`);
+  console.log(`凭据已保存到 ${display(credsFile)}(密码仅当前 Windows 账户可解密)`);
   console.log(`设备指纹: ${fingerPrint.slice(0, 8)}…` +
     '(首次登录可能触发二次认证,验证一次后免认证;完整指纹存于本地凭据文件)');
 }

@@ -98,6 +98,33 @@ test('max_tokens: 缺省时不注入任何值', () => {
   assert.ok(!('max_tokens' in p));
 });
 
+// ---- normalizePayload: max_completion_tokens(新版 OpenAI 客户端方言) ----
+test('max_completion_tokens: 映射为 max_tokens 并接受区间约束(两方向)', () => {
+  const big = { model: MODEL, max_completion_tokens: 384000, messages: [] };
+  const appliedBig = normalizePayload(big, MODEL);
+  assert.strictEqual(big.max_tokens, 65536);
+  assert.ok(!('max_completion_tokens' in big));
+  assert.ok(appliedBig.includes('max_completion_tokens→max_tokens') && appliedBig.includes('max_tokens→65536'));
+
+  const small = { model: MODEL, max_completion_tokens: 16, messages: [] };
+  normalizePayload(small, MODEL);
+  assert.strictEqual(small.max_tokens, 512);
+});
+
+test('max_completion_tokens: 思考关闭时不抬升,原值映射', () => {
+  const p = { model: MODEL, max_completion_tokens: 16, reasoning_effort: 'none', messages: [] };
+  normalizePayload(p, MODEL);
+  assert.strictEqual(p.max_tokens, 16);
+  assert.ok(!('max_completion_tokens' in p));
+});
+
+test('max_completion_tokens: 两键并存时以新键为准', () => {
+  const p = { model: MODEL, max_completion_tokens: 2000, max_tokens: 9000, messages: [] };
+  normalizePayload(p, MODEL);
+  assert.strictEqual(p.max_tokens, 2000);
+  assert.ok(!('max_completion_tokens' in p));
+});
+
 test('max_tokens: 512-65536 区间内原样保留', () => {
   for (const mt of [512, 4096, 65536]) {
     const p = { model: MODEL, max_tokens: mt, messages: [] };

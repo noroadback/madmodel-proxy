@@ -9,6 +9,11 @@ function translateUpstreamError(bodyObj, raw, status) {
   if (status === 404) {
     return { http: 502, message: '上游返回 404:端点可能已变更' };
   }
+  // HTTP 层 401/403(token 有效期内被吊销等形态)与结构化 status 10003
+  // 同等映射:落在最底部会变成语义错误的 502"无法识别的响应"
+  if (status === 401 || status === 403) {
+    return { http: 401, message: '认证失败(token 无效或被拒绝)。请确认 watch 守护进程在运行: node refresh-token.js watch' };
+  }
   const detail = bodyObj && (bodyObj.errorMessage || bodyObj.message || bodyObj.error?.message ||
     bodyObj.detail || (typeof bodyObj.error === 'string' ? bodyObj.error : ''));
   if (bodyObj?.status === 10003) {
