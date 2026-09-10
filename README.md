@@ -14,7 +14,7 @@ cd madmodel-proxy
 node refresh-token.js login
 ```
 
-第一次登录大概率遇到二次认证（新设备验证）：终端列出可用验证方式（微信 / 短信 / TOTP），选一个输六位验证码；通过后本机登记为可信设备，之后的自动续期不再需要。凭据静态加密存于 `%USERPROFILE%\.madmodel-proxy\`（macOS / Linux 为 `~/.madmodel-proxy/`），加密形态与数据流向见 [SECURITY.md](SECURITY.md)。
+凭据静态加密存于 `%USERPROFILE%\.madmodel-proxy\`（macOS / Linux 为 `~/.madmodel-proxy/`），加密形态与数据流向见 [SECURITY.md](SECURITY.md)。
 
 Windows 双击 **start.cmd** 启动（首次会问是否创建桌面快捷方式；代理已在运行时再次运行会显示状态，不会重复启动），macOS / Linux 运行 `npm start`。窗口保持开启。启动成功的标志是下面这样的输出：
 
