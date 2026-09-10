@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // refresh-token.js
 // CLI 入口:配置凭据(首次) + 手动/自动续期 madmodel token。
-// token 写入 %USERPROFILE%\.dsh-madmodel\token.json,反代热加载。
+// token 写入 %USERPROFILE%\.madmodel-proxy\token.json,反代热加载。
 //
 // 用法:
 //   node refresh-token.js login          # 首次配置:输入学号密码,保存并取一次 token

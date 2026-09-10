@@ -2,7 +2,8 @@
 // Linux 密钥原语:机器绑定 AES-256-GCM。密钥由 /etc/machine-id + 当前
 // uid/用户名经 scrypt 派生,每次写入换新盐防离线比对。文件被拷贝或同步到
 // 其他机器/账户后解不开(读回按"无数据"处理,重新 login 即可)——堵住
-// ~/.dsh-madmodel 点文件被云同步、误提交进 git 的现实威胁;本机同用户进程
+// 状态目录(~/.madmodel-proxy)点文件被云同步、误提交进 git 的现实威胁;
+// 本机同用户进程
 // 可解,这是任何本地凭据方案的等价下界(DPAPI 同样挡不住)。
 // 不用 secret-tool(D-Bus Secret Service):无人值守守护在无桌面会话/SSH
 // 下读不了锁着的 keyring,那是最脆的依赖。

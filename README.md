@@ -14,7 +14,7 @@ cd madmodel-proxy
 node refresh-token.js login
 ```
 
-第一次登录大概率遇到二次认证（新设备验证）：终端列出可用验证方式（微信 / 短信 / TOTP），选一个输六位验证码；通过后本机登记为可信设备，之后的自动续期不再需要。凭据静态加密存于 `%USERPROFILE%\.dsh-madmodel\`（macOS / Linux 为 `~/.dsh-madmodel/`），加密形态与数据流向见 [SECURITY.md](SECURITY.md)。
+第一次登录大概率遇到二次认证（新设备验证）：终端列出可用验证方式（微信 / 短信 / TOTP），选一个输六位验证码；通过后本机登记为可信设备，之后的自动续期不再需要。凭据静态加密存于 `%USERPROFILE%\.madmodel-proxy\`（macOS / Linux 为 `~/.madmodel-proxy/`），加密形态与数据流向见 [SECURITY.md](SECURITY.md)。
 
 Windows 双击 **start.cmd** 启动（首次会问是否创建桌面快捷方式；代理已在运行时再次运行会显示状态，不会重复启动），macOS / Linux 运行 `npm start`。窗口保持开启。启动成功的标志是下面这样的输出：
 
@@ -66,7 +66,7 @@ madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件�
 | 启动报 `端口 8080 已被占用` | 代理已在运行，直接使用；需另开实例时用 `PROXY_PORT` |
 | 上游 401/502/429 | 上游侧问题，通常自愈；持续出现提 issue 附代理日志 |
 | token 长期无人续期 | 改过密码或二次认证过期，重跑一次 `node refresh-token.js login` |
-| 仓库文件夹丢失 | 重新 clone 即可，登录状态不丢：状态目录（`~/.dsh-madmodel/`）与仓库分离 |
+| 仓库文件夹丢失 | 重新 clone 即可，登录状态不丢：状态目录（`~/.madmodel-proxy/`）与仓库分离 |
 
 ## 环境变量
 

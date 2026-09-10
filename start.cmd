@@ -7,21 +7,21 @@ rem Honors PROXY_PORT if set (defaults to 8080).
 rem First run offers a desktop shortcut (single keypress, answer
 rem remembered in the state dir, never asked again).
 setlocal EnableDelayedExpansion
-title madmodel proxy (dsh)
+title madmodel proxy
 
 set "MADPORT=8080"
 if defined PROXY_PORT set "MADPORT=%PROXY_PORT%"
 
 rem First-run: offer a desktop shortcut for daily launching.
 rem choice /c YN: single keypress, Y and y both work, no Enter needed.
-if not exist "%USERPROFILE%\.dsh-madmodel\shortcut-created" (
+if not exist "%USERPROFILE%\.madmodel-proxy\shortcut-created" (
   echo.
   echo Create a desktop shortcut for madmodel?
   echo ^(Starts minimized; you can also run create-shortcut.cmd later.^)
   choice /c YN /n /m "Press Y to create, N to skip: "
   if !errorlevel!==1 call "%~dp0create-shortcut.cmd"
-  if not exist "%USERPROFILE%\.dsh-madmodel" mkdir "%USERPROFILE%\.dsh-madmodel"
-  type nul > "%USERPROFILE%\.dsh-madmodel\shortcut-created"
+  if not exist "%USERPROFILE%\.madmodel-proxy" mkdir "%USERPROFILE%\.madmodel-proxy"
+  type nul > "%USERPROFILE%\.madmodel-proxy\shortcut-created"
   echo.
 )
 

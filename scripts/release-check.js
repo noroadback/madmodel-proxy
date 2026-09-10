@@ -49,10 +49,10 @@ for (const name of SENSITIVE) {
   if (baseNames.has(name)) fail(`敏感文件被 Git 跟踪: ${name}`);
   else ok(`敏感文件未被跟踪: ${name}`);
 }
-if (tracked.some(f => f.includes('.dsh-madmodel'))) {
-  fail('状态目录 .dsh-madmodel/ 下有文件被跟踪');
+if (tracked.some(f => f.includes('.madmodel-proxy') || f.includes('.dsh-madmodel'))) {
+  fail('状态目录(.madmodel-proxy/ 或旧名 .dsh-madmodel/)下有文件被跟踪');
 } else {
-  ok('状态目录 .dsh-madmodel/ 未被跟踪');
+  ok('状态目录(.madmodel-proxy/ 及旧名 .dsh-madmodel/)未被跟踪');
 }
 
 // 4) 当前 Node 版本满足 engines.node

@@ -3,7 +3,7 @@
 // 监听 127.0.0.1:8080,供 dsh 等标准 OpenAI 客户端使用。
 //
 // 职责(按已验证的 API 规格书):
-//   1. token 热加载:每请求读 ~/.dsh-madmodel/token.json(watch 守护续期,免重启)
+//   1. token 热加载:每请求读 ~/.madmodel-proxy/token.json(watch 守护续期,免重启)
 //   2. 强制上游 stream:true 绕 60s nginx 非流式超时;客户端要非流式时自己聚合 SSE
 //   3. 错误翻译:上游错误统一翻译为标准 4xx/5xx;流截断(EOF 无 [DONE])按 502/
 //      断流处理,不聚合成假成功

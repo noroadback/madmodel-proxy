@@ -2,6 +2,17 @@
 
 本文件记录各版本的行为变化与关键取舍。日期为实测或落地日期。
 
+## 1.6.1
+
+### 状态目录更名 `.dsh-madmodel` → `.madmodel-proxy`（2026-09-10）
+
+旧目录名是项目早期的历史命名（当初专为接 dsh 而写），项目早已泛化为通用 OpenAI 端点，名字与现状不符（非 dsh 用户会在家目录看到一个陌生的 dsh 目录）。
+
+- 启动时自动迁移：`platform/paths.js` 把旧目录中的 `creds.json`、`token.json`、`api-key`、`last-failed-request.json` 逐文件 rename 到新目录。文件级 rename 天然抗双进程竞态（start.cmd 同窗拉起 watch 与代理，两者都执行迁移：一方成功，另一方 ENOENT 跳过）。锁文件与 shortcut 标记不迁（新目录自建）；迁空后删旧目录，残留无害
+- `MADMODEL_STATE_DIR` 重定向时（CI/测试）跳过迁移，不触碰真实凭据；`display()` 改为从实际 `STATE_DIR` 派生目录名，不再二次硬编码
+- `start.cmd` 的硬编码路径（批处理无法 require paths.js）与标题 `(dsh)` 同步清理；`.gitignore` 与 release-check 同时兜底新旧两个目录名（旧目录在迁移失败场景可能残留）
+- 本机实测迁移：2 个凭据文件搬移、旧目录剩锁与标记、代理从新路径热读 token 正常服务；新增 `test/paths.test.js` 5 项（迁移/幂等/空操作/建目录/锁不迁），全套 81 项绿
+
 ## 1.6.0
 
 ### 本地精确分词 + max_tokens 预检收缩（2026-09-10）

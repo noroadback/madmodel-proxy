@@ -37,6 +37,6 @@ node proxy.js          :: 或 start.cmd 单窗口模式
 
 - token 和密码。包括你本机 `token.json`、`creds.json` 的内容，以及日志截图里的 Bearer 头、学号、密码
 - 真实请求体。对话内容是隐私，`DUMP_FAILED=1` 产生的 `last-failed-request.json` 绝不能入库
-- 本地状态文件。`~/.dsh-madmodel/` 下的一切（`.gitignore` 有兜底，别绕过）
+- 本地状态文件。`~/.madmodel-proxy/` 下的一切（`.gitignore` 有兜底，别绕过）
 
 以上任何一项出现在 PR 里都会被直接拒绝。不确定时看 [SECURITY.md](SECURITY.md) 的数据流向表，或在 issue 里问。

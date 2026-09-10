@@ -3,14 +3,16 @@ last-failed-request.json
 *.tmp
 *.stale.*
 
-# 凭据与密钥(正常位于 %USERPROFILE%\.dsh-madmodel\,此为防御性兜底)
+# 凭据与密钥(正常位于 %USERPROFILE%\.madmodel-proxy\,此为防御性兜底)
 api-key
 token.json
 creds.json
 watch.lock
 auth.lock
 
-# 状态目录兜底(路径错误的极端情况下整目录拒绝入库)
+# 状态目录兜底(路径错误的极端情况下整目录拒绝入库;旧目录名为 ≤1.6.0 历史,
+# 迁移后仍可能残留,一并兜底)
+.madmodel-proxy/
 .dsh-madmodel/
 
 # 系统
