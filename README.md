@@ -56,6 +56,7 @@ madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件�
 |---|---|
 | 请求 401 `token 已过期` | watch 守护没在跑或续期失败。`node refresh-token.js status` 一屏看清；没跑就开 start.cmd 或 `npm start` |
 | 请求 503 | 本地无 token。没做过 login，或 `[watch]` 日志有报错 |
+| 请求 413 上下文超限 | 会话接近 262,144 tokens 上限（`max_tokens` 已被代理自动收缩过仍不够）。新开会话，或让客户端压缩 history |
 | 启动报 `端口 8080 已被占用` | 代理已在运行，直接使用；需另开实例时用 `PROXY_PORT` |
 | 上游 401/502/429 | 上游侧问题，通常自愈；持续出现提 issue 附代理日志 |
 | token 长期无人续期 | 改过密码或二次认证过期，重跑一次 `node refresh-token.js login` |

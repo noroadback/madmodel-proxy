@@ -27,7 +27,7 @@ Windows 双击 **`start.cmd`**（首次启动会问是否创建桌面快捷方�
 ```
 [watch] madmodel token 自动续期守护进程已启动(PID 12345)
 [代理] madmodel 本地端点已启动: http://127.0.0.1:8080/v1
-[代理] 模型: DeepSeek-V4-Flash
+[代理] 模型: DeepSeek-V4-Flash-0731
 [代理] 本地无鉴权(客户端 API key 填任意值);安全边界为本机回环 + Host 白名单
 [代理] token 文件: %USERPROFILE%\.dsh-madmodel\token.json(热加载,续期免重启)
 [代理] 当前 token 剩余 272 分钟
@@ -45,7 +45,7 @@ macOS / Linux 上 `token 文件` 一行显示为 `~/.dsh-madmodel/token.json`，
 | API Key | 任意值（本地无鉴权，字段仅需满足界面非空校验） |
 | 模型名 | `DeepSeek-V4-Flash-0731` |
 
-客户端要求填写上下文长度时填 `262144`（学校部署的实际值，不要用官方 DeepSeek 的 1M 规格）。
+客户端要求填写上下文长度时填 `262144`（学校部署的实际值，不要用官方 DeepSeek 的 1M 规格）。输出上限（max_tokens / 最大输出）按客户端默认即可——`prompt + max_tokens` 超出上限时代理会自动把输出预算收缩到剩余空间再发，仅极长输出需要续写。
 
 ## 第 4 步：验证
 
@@ -65,6 +65,7 @@ macOS / Linux 上 `token 文件` 一行显示为 `~/.dsh-madmodel/token.json`，
 |---|---|
 | 401"token 已过期" | 续期守护没在跑。看 start.cmd 窗口的 `[watch]` 日志是否报错或停了，死了就重开 start.cmd |
 | 503 | 本地无 token。没做过第 1 步，或 `[watch]` 日志有报错 |
+| 413 上下文超限 | 会话接近 262,144 tokens 上限（输出预算已被代理自动收缩过仍不够）。新开会话，或让客户端压缩 history |
 | 429 | 上游繁忙或过载保护。稍等重试；持续出现看代理日志的 `overload:` 或 `upstream-err` 条目 |
 | 5xx 且提示上游拒绝 | madmodel 服务端的问题，与本工具无关，稍后再试 |
 
