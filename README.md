@@ -14,7 +14,15 @@ cd madmodel-proxy
 node refresh-token.js login
 ```
 
-Windows 双击 **start.cmd** 启动（首次会问是否创建桌面快捷方式；代理已在运行时再次运行会显示状态，不会重复启动），macOS / Linux 运行 `npm start`。窗口保持开启。
+第一次登录大概率遇到二次认证（新设备验证）：终端列出可用验证方式（微信 / 短信 / TOTP），选一个输六位验证码；通过后本机登记为可信设备，之后的自动续期不再需要。凭据静态加密存于 `%USERPROFILE%\.dsh-madmodel\`（macOS / Linux 为 `~/.dsh-madmodel/`），加密形态与数据流向见 [SECURITY.md](SECURITY.md)。
+
+Windows 双击 **start.cmd** 启动（首次会问是否创建桌面快捷方式；代理已在运行时再次运行会显示状态，不会重复启动），macOS / Linux 运行 `npm start`。窗口保持开启。启动成功的标志是下面这样的输出：
+
+```
+[watch] madmodel token 自动续期守护进程已启动(PID 12345)
+[代理] madmodel 本地端点已启动: http://127.0.0.1:8080/v1
+[代理] 当前 token 剩余 272 分钟
+```
 
 在客户端（智能体、OpenAI SDK）里填以下值。
 
@@ -25,9 +33,7 @@ Windows 双击 **start.cmd** 启动（首次会问是否创建桌面快捷方式
 | API Key | 任意值（本地无鉴权） |
 | 模型 | `DeepSeek-V4-Flash-0731` |
 
-客户端要求填写上下文长度时填 `262144`（学校部署的实际值）。不要按官方 DeepSeek 规格配置——部分客户端会自动匹配到官方的 1M 上下文，长会话会越过上限。
-
-详细步骤与故障排查见 [docs/connect-dsh.md](docs/connect-dsh.md)。
+客户端要求填写上下文长度时填 `262144`（学校部署的实际值）。不要按官方 DeepSeek 规格配置——部分客户端会自动匹配到官方的 1M 上下文，长会话会越过上限。输出上限（max_tokens）按客户端默认即可：`prompt + max_tokens` 超出 262,144 时代理自动把输出预算收缩到剩余空间再发，仅极长输出需要续写。
 
 ## 为什么需要它
 
@@ -60,6 +66,7 @@ madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件�
 | 启动报 `端口 8080 已被占用` | 代理已在运行，直接使用；需另开实例时用 `PROXY_PORT` |
 | 上游 401/502/429 | 上游侧问题，通常自愈；持续出现提 issue 附代理日志 |
 | token 长期无人续期 | 改过密码或二次认证过期，重跑一次 `node refresh-token.js login` |
+| 仓库文件夹丢失 | 重新 clone 即可，登录状态不丢：状态目录（`~/.dsh-madmodel/`）与仓库分离 |
 
 ## 环境变量
 
@@ -75,7 +82,6 @@ madmodel 本身有 OpenAI 格式的 API，但直接连客户端会撞上两件�
 
 ## 更多
 
-- 详细接入指南与故障排查，见 [docs/connect-dsh.md](docs/connect-dsh.md)。
 - 上游实测行为与设计取舍，见 [CHANGELOG.md](CHANGELOG.md)。
 - 数据流向与安全边界，见 [SECURITY.md](SECURITY.md)。
 - 参与贡献，见 [CONTRIBUTING.md](CONTRIBUTING.md)。
