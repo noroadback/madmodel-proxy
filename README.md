@@ -1,6 +1,6 @@
 # madmodel-proxy
 
-把清华的 DeepSeek 服务（https://madmodel.cs.tsinghua.edu.cn/）变成本地 OpenAI 端点。token 过期自动续期，上游接口的兼容性问题在代理层处理，客户端只需连 `http://127.0.0.1:8080/v1`。
+把清华的 DeepSeek 服务（[madmodel.cs.tsinghua.edu.cn](https://madmodel.cs.tsinghua.edu.cn/)）变成本地 OpenAI 端点。token 过期自动续期，上游接口的兼容性问题在代理层处理，客户端只需连 `http://127.0.0.1:8080/v1`。
 
 ## 使用
 
