@@ -9,6 +9,8 @@
 const { spawn } = require('child_process');
 const path = require('path');
 const readline = require('readline');
+const { checkForUpdate } = require('./core/update-check');
+const pkg = require('./package.json');
 
 const children = new Set();
 
@@ -94,6 +96,22 @@ console.log('madmodel 单窗口模式:watch 续期守护 + 本地端点同窗运
 console.log('停止:本窗口 Ctrl+C 或直接关窗(两者一起停;watch 锁残留由下次启动自动探活接管)');
 console.log('日志会显示每次对话的 token 用量;想看状态再双击一次 start.cmd(在跑即显示体检)');
 console.log('──────────────────────────────────────────────');
+
+// 启动时检查新版本:匿名请求 GitHub releases/latest(不带任何凭据,失败静默,
+// 不阻塞子进程启动),有新版时打一行提示。PROXY_NO_UPDATE_CHECK=1 可关闭
+// (=0 视为开启,其余非空值关闭)。catch 兜底:响应在关窗后才落地时,向已
+// 关闭的 stdout 写入会抛错,不能让它变成未处理拒绝
+const noUpdate = process.env.PROXY_NO_UPDATE_CHECK;
+if (!noUpdate || noUpdate === '0') {
+  checkForUpdate('noroadback/madmodel-proxy', pkg.version)
+    .then(r => {
+      if (r && r.update) {
+        console.log(`[dashboard] 有新版本 ${r.update}(当前 v${pkg.version})。在项目文件夹里 git pull,再重开本窗口即可升级`);
+      }
+    })
+    .catch(() => {});
+}
+
 launch('watch', 'refresh-token.js', ['watch']);
 launch('代理', 'proxy.js', []);
 
