@@ -2,6 +2,18 @@
 
 本文件记录各版本的行为变化与关键取舍。日期为实测或落地日期。
 
+## 1.7.1
+
+### PR #1 合并后的三条审阅加固（2026-09-10）
+
+外部贡献的 1.7.0 合并后（合并前经校外网络实测验证：直连 307 门禁复现、隧道 chat 三连 200、无 cookie 302、保活探针 ok），按双向审阅意见补三条加固：
+
+- **cookie 回传收窄到隧道形态**（`config.tunnelMode` + `upstream-client` 门控）：直连覆盖（`PROXY_UPSTREAM`）时不再把 webvpn 域签发的会话 cookie 发给 `madmodel.cs` 域（凭据卫生：cookie 只回传给签发它的 origin）
+- **隧道前缀单一来源**：`MADMODEL_VPN_PREFIX` 从 `madmodel-auth.js` 导出，`config.js` 的默认上游/保活推导/隧道判定全部改用同一常量——此前 77 字符编码串在两处复制，漂移会造成"上游是隧道但保活静默禁用"的错位
+- **保活重签的 BAD_CREDENTIALS 上限**：连续 3 次与主循环同纪律上抛停止（改密码等场景，5 分钟一次的完整登录链只是空打 `id.tsinghua.edu.cn`），非坏凭据失败清零计数
+
+附带：四个新测试文件补行尾换行；1.7.0 条目测试计数修正（103 项）。
+
 ## 1.7.0
 
 ### 上游默认走 WebVPN 隧道 + 会话 cookie 保活（2026-09-10）
@@ -18,7 +30,7 @@
 - 传输形态兼顾校内/校外：校内外认证与上游都经 WebVPN 隧道（校内外网络均可达），默认两类场景直接可用；校内可直接用 `PROXY_UPSTREAM` 覆盖为直连域名，直连形态下保活自动禁用——直连无会话 cookie 可探，且其 3xx（如门禁 307）会被 `classifyProbeStatus` 误判为 invalid 触发无谓续期，故 `keepaliveUrl` 仅对隧道路径推导
 - 上游请求在隧道形态下携带 `Cookie` 头回传隧道会话；直连上游（老配置/覆盖）不带该头不受影响（`core/upstream-client.js`）
 
-**验证**：新增离线单测 4 组，覆盖保活推导（`config-keepalive`）、保活状态机（`scheduler-keepalive`）、cookie 持久化往返（`credential-store`）、探活状态分类（`probe-classify`），全套 102 项绿（`npm test`）；`npm run check:release` 通过。真实流量冒烟（`npm run smoke`）：隧道形态 cookie 透传、302 → /login 判定与重签节奏经 2026-09-10 本机实测校验。
+**验证**：新增离线单测 4 组，覆盖保活推导（`config-keepalive`）、保活状态机（`scheduler-keepalive`）、cookie 持久化往返（`credential-store`）、探活状态分类（`probe-classify`），全套 103 项绿（`npm test`）；`npm run check:release` 通过。真实流量冒烟（`npm run smoke`）：隧道形态 cookie 透传、302 → /login 判定与重签节奏经 2026-09-10 本机实测校验。
 
 ## 1.6.1
 

@@ -49,7 +49,7 @@ async function readLimited(reader, limit) {
 
 function createUpstreamClient(config) {
   const {
-    upstream,
+    upstream, tunnelMode,
     streamIdleTimeout, streamTotalTimeout, upstreamHeaderTimeout,
     upstreamJsonBodyLimit, upstreamSseTotalLimit, sseLineLimit,
   } = config;
@@ -110,10 +110,11 @@ function createUpstreamClient(config) {
           Authorization: `Bearer ${token}`,
           Accept: 'text/event-stream',
         };
-        // WebVPN 隧道会话凭证:上游走隧道前缀时必带,否则隧道把请求当未登录
-        // 踢回登录页(表现为 upstream-error 502/307)。直连上游的老配置不带
-        // 此头不受影响
-        if (cookie) reqHeaders.Cookie = cookie;
+        // WebVPN 隧道会话凭证:仅隧道形态回传——不带会被隧道当未登录踢回
+        // 登录页(表现为 upstream-error 502/307);直连覆盖(PROXY_UPSTREAM)时
+        // webvpn 域签发的 cookie 不发给 madmodel.cs 域(凭据卫生:cookie 只
+        // 回传给签发它的 origin)
+        if (cookie && tunnelMode) reqHeaders.Cookie = cookie;
 
         const up = await fetch(upstream, {
           method: 'POST',

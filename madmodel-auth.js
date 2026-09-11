@@ -772,6 +772,10 @@ module.exports = {
   requestWithRedirects,
   classifyProbeStatus,
   probeWebvpnSession,
+  // madmodel 应用的 WebVPN 隧道前缀:config.js 据此拼默认上游、判隧道形态与
+  // cookie 回传——单一来源,防止复制串漂移导致"上游是隧道但保活/cookie 判定
+  // 失效"的静默错位
+  MADMODEL_VPN_PREFIX,
   // 以下为认证链中出错概率最高的纯判定函数(响应体解码/URL 解析/重定向白名单)。
   // 认证链无法端到端离线验证,单独导出便于本地复现与审查
   decodeBody,

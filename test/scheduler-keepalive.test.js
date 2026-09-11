@@ -103,6 +103,51 @@ test("verdict 'invalid' + 重签失败:记录错误,5 分钟后重试", async ()
   assert.strictEqual(s.nextKeepaliveAt, DUE_ANYWAY + RETRY_5M);
 });
 
+test('重签连续 3 次 BAD_CREDENTIALS:与主循环同纪律上抛停止', async () => {
+  const { s, advance } = makeScheduler({
+    verdict: 'invalid',
+    refreshErr: Object.assign(new Error('bad creds'), { code: 'BAD_CREDENTIALS' }),
+  });
+  await s.runKeepaliveIfDue();   // 第 1 次:5 分钟重试
+  assert.strictEqual(s.keepaliveBadCreds, 1);
+  advance(RETRY_5M);
+  await s.runKeepaliveIfDue();   // 第 2 次
+  assert.strictEqual(s.keepaliveBadCreds, 2);
+  advance(RETRY_5M);
+  await assert.rejects(          // 第 3 次:上抛,不再空打登录链
+    () => s.runKeepaliveIfDue(),
+    (e) => e.code === 'BAD_CREDENTIALS',
+  );
+});
+
+test('非坏凭据的重签失败清零计数(与主循环 badCredsStreak 同语义)', async () => {
+  let calls = 0;
+  const { s, advance } = makeScheduler({ verdict: 'invalid' });
+  s.refresh = async () => {
+    calls += 1;
+    if (calls % 2 === 1) throw Object.assign(new Error('bad'), { code: 'BAD_CREDENTIALS' });
+    throw Object.assign(new Error('net'), { code: 'AUTH_BUSY' });
+  };
+  await s.runKeepaliveIfDue();   // BAD_CREDENTIALS → 1
+  assert.strictEqual(s.keepaliveBadCreds, 1);
+  advance(RETRY_5M);
+  await s.runKeepaliveIfDue();   // AUTH_BUSY → 清零
+  assert.strictEqual(s.keepaliveBadCreds, 0);
+});
+
+test('重签成功后计数清零', async () => {
+  let calls = 0;
+  const { s, advance } = makeScheduler({ verdict: 'invalid' });
+  s.refresh = async () => {
+    calls += 1;
+    if (calls === 1) throw Object.assign(new Error('bad'), { code: 'BAD_CREDENTIALS' });
+  };
+  await s.runKeepaliveIfDue();   // 失败 → 1
+  advance(RETRY_5M);
+  await s.runKeepaliveIfDue();   // 成功 → 0
+  assert.strictEqual(s.keepaliveBadCreds, 0);
+});
+
 test("verdict 'invalid' + 重签抛 TWO_FACTOR_REQUIRED:上抛交给上层处理", async () => {
   const { s } = makeScheduler({
     verdict: 'invalid',

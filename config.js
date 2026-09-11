@@ -6,6 +6,7 @@
 'use strict';
 
 const paths = require('./platform/paths');
+const { MADMODEL_VPN_PREFIX } = require('./madmodel-auth');
 
 // 解析环境变量中的数字:空/未定义用默认值;非有限数、负数回退默认值;
 // 0 仅在默认值本身为 0 时有意义,其余场景 0 视同非法(避免 0 意外关掉某项
@@ -20,18 +21,19 @@ function numberEnv(name, fallback) {
 
 const PORT = numberEnv('PROXY_PORT', 8080);
 
-// WebVPN 隧道默认上游(隧道前缀与 madmodel-auth.js 的 MADMODEL_VPN_PREFIX 同源)
-const DEFAULT_UPSTREAM =
-  'https://webvpn.tsinghua.edu.cn/https/77726476706e69737468656265737421fdf6459128346d5c300b9ae28c462a3b27469fc32211fa26a3e464/v1/chat/completions';
+// WebVPN 隧道默认上游:前缀从 madmodel-auth.js 导出(单一来源——上游 URL、
+// 保活地址推导、cookie 回传判定共用同一常量,复制串漂移会造成"上游是隧道
+// 但保活静默禁用"的错位)
+const DEFAULT_UPSTREAM = `${MADMODEL_VPN_PREFIX}/v1/chat/completions`;
 
-// 保活探测地址:上游同前缀的 /v1/models(GET 轻量)。只对 WebVPN 隧道路径
-// 启用——保活语义与探活判定(classifyProbeStatus)建立在隧道"未认证会话
-// 3xx 跳登录页"的固定形态上;PROXY_UPSTREAM 覆盖成校内直连或测试假上游
-// 时,既无隧道会话 cookie 可探,直连域门的 307 还会被误判为 invalid 触发
-// 无谓续期,故一律导出 null、保活整体禁用。
+// 隧道形态判定 + 保活探测地址推导(上游同前缀的 /v1/models,GET 轻量)。
+// 只对 madmodel 的隧道前缀启用——保活语义与探活判定(classifyProbeStatus)
+// 建立在隧道"未认证会话 3xx 跳登录页"的固定形态上;PROXY_UPSTREAM 覆盖成
+// 校内直连或测试假上游时,既无隧道会话 cookie 可探,直连域门的 307 还会被
+// 误判为 invalid 触发无谓续期,故一律导出 null、保活整体禁用
 const upstreamUrl = process.env.PROXY_UPSTREAM || DEFAULT_UPSTREAM;
-const TUNNEL_BASE = 'https://webvpn.tsinghua.edu.cn/https/';
-const keepaliveMatch = upstreamUrl.startsWith(TUNNEL_BASE) &&
+const tunnelMode = upstreamUrl.startsWith(`${MADMODEL_VPN_PREFIX}/`);
+const keepaliveMatch = tunnelMode &&
   /^(.+\/)v1\/chat\/completions$/.exec(upstreamUrl);
 
 module.exports = Object.freeze({
@@ -45,13 +47,17 @@ module.exports = Object.freeze({
   contextWindow: 262144,
   maxModelTokens: 65536,
   // PROXY_UPSTREAM / PROXY_TOKEN_FILE:测试注入用(端到端测试指向本地假上游)
-  // 2026-09-10 起 madmodel 直连域名被新版 TsinghuaLB(26.09.07)的 oauth 门禁接管:
-  // 未带 LB 凭证的请求一律 307 到 oauth.tsinghua.edu.cn,且跟随回跳链会丢失
-  // Authorization/请求体(最终 10003)。WebVPN 隧道(wengine_vpn_ticket cookie +
-  // Bearer)不受该门禁影响,实测稳定可用,故上游默认走隧道——前缀与
-  // madmodel-auth.js 的 MADMODEL_VPN_PREFIX 同源,隧道 cookie 由认证链随 token
-  // 一同刷新持久化(cookie 存取见 platform 侧与 upstream-client 的 Cookie 头)。
+  // 2026-09-10 起 madmodel 直连域名被新版 TsinghuaLB(26.09.07)的 oauth 门禁接管
+  // (未带 LB 凭证的请求一律 307 到 oauth.tsinghua.edu.cn,跟随回跳链丢失
+  // Authorization/请求体,最终 10003;当日校外网络实测复现)。WebVPN 隧道
+  // (wengine_vpn_ticket cookie + Bearer)不受该门禁影响,实测稳定可用,故
+  // 上游默认走隧道;隧道 cookie 由认证链随 token 一同刷新持久化(存取见
+  // platform 侧与 upstream-client 的 Cookie 头)。
   upstream: upstreamUrl,
+  // 隧道形态判定(与 keepaliveUrl 同源):upstream-client 仅在隧道形态回传
+  // WebVPN 会话 cookie——直连覆盖(PROXY_UPSTREAM)时把 webvpn 域签发的
+  // cookie 发给 madmodel.cs 域属凭据卫生问题
+  tunnelMode,
   tokenFile: process.env.PROXY_TOKEN_FILE || paths.TOKEN_FILE,
   // 测试注入的 token 文件为明文 JSON(假 token 不走 DPAPI)
   tokenFileInjected: !!process.env.PROXY_TOKEN_FILE,
