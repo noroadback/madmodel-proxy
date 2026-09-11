@@ -52,6 +52,14 @@ class Scheduler {
     this.keepaliveBadCreds = 0;
   }
 
+  // 外部 poking:代理侧发现隧道会话被拒(302→/login)时,watch 消费 revive
+  // 标志后调这里——把保活时钟拉回当前,主循环下一圈立即探活重签。用于
+  // 网络切换后 WebVPN 会话绑定失效的快速自愈(会话绑定来源网络,切网即死,
+  // 常规保活周期最长要等 25 分钟)。未启用保活时是空操作
+  pokeKeepalive() {
+    if (this.keepalive) this.nextKeepaliveAt = 0;
+  }
+
   // 外部关闭:解除挂起的等待,循环在下一次检查点退出
   stop() {
     this.stopping = true;

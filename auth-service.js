@@ -5,6 +5,7 @@
 
 'use strict';
 
+const fs = require('fs');
 const readline = require('readline');
 const { MadmodelAuthClient, CookieJar, AuthError, generateFingerprint, probeWebvpnSession } = require('./madmodel-auth');
 const credentials = require('./platform/credentials');
@@ -12,7 +13,7 @@ const processLock = require('./platform/process-lock');
 const { createFileWakeup } = require('./platform/file-store');
 const { Scheduler } = require('./core/scheduler');
 const config = require('./config');
-const { TOKEN_FILE, CREDS_FILE, WATCH_LOCK, AUTH_LOCK } = require('./platform/paths');
+const { TOKEN_FILE, CREDS_FILE, WATCH_LOCK, AUTH_LOCK, TUNNEL_REVIVE } = require('./platform/paths');
 
 // 认证操作锁(login/once 与 watch 续期共用):用户手动 login 时 watch 恰好在
 // 走登录链,会触发重复二次认证且 token 互相覆盖。watch 抢不到锁按瞬时错误
@@ -115,16 +116,44 @@ async function watch() {
   });
 
   console.log('madmodel token 自动续期守护进程已启动(PID ' + process.pid + ')');
-  const wakeup = createFileWakeup([TOKEN_FILE, CREDS_FILE]);
+  // TUNNEL_REVIVE 一并纳入监听:代理遇隧道会话被拒(302→/login,如网络切换
+  // 后 WebVPN 会话绑定失效)时写该标志,文件事件把 wait 提前唤醒
+  const wakeup = createFileWakeup([TOKEN_FILE, CREDS_FILE, TUNNEL_REVIVE]);
+  // 标志消费:唤醒后若标志存在,poke 保活时钟让主循环下一圈立即探活重签
+  // (秒级自愈,不等 25 分钟的常规周期)。消费即删除;删除动作会再触发一次
+  // 无害的空唤醒(标志已不在,按普通 token/creds 事件处理)
+  let consumeRevive = null;
   const scheduler = new Scheduler({
     config,
     readToken: () => credentials.readToken(),
     hasCredentials: () => credentials.hasAccount(),
     refresh: () => refresh({ interactive: false }),
-    wakeup,
+    wakeup: {
+      reset: () => wakeup.reset(),
+      close: () => wakeup.close(),
+      wait: ms => wakeup.wait(ms).then(reason => {
+        if (reason === 'changed' && consumeRevive) consumeRevive();
+        return reason;
+      }),
+    },
     log: msg => console.log('[' + stamp() + '] ' + msg),
     logError: msg => console.error('[' + stamp() + '] ' + msg),
   });
+  consumeRevive = () => {
+    try {
+      fs.statSync(TUNNEL_REVIVE);
+      fs.unlinkSync(TUNNEL_REVIVE);
+    } catch (e) {
+      // 标志不存在 = 普通 token/creds 事件,静默;其他错误(权限/占用)留痕:
+      // 标志会残留并在下次唤醒重试,但反复戳不醒的故障不能无声消失
+      if (e.code !== 'ENOENT') {
+        console.error('[' + stamp() + '] 消费 tunnel-revive 标志失败(' + e.code + '): ' + e.message);
+      }
+      return;
+    }
+    console.log('[' + stamp() + '] 代理报告隧道会话被拒,立即探活(网络切换场景常见)');
+    scheduler.pokeKeepalive();
+  };
   // 隧道会话保活:带存储的 cookie 探活 WebVPN 隧道(探测本身重置隧道空闲
   // 计时),失效则 scheduler 立即重签。上游非隧道形态(config.keepaliveUrl
   // 为 null,如测试假上游)时不启用

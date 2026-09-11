@@ -148,6 +148,31 @@ test('重签成功后计数清零', async () => {
   assert.strictEqual(s.keepaliveBadCreds, 0);
 });
 
+test('pokeKeepalive:时钟拉回当前,未到期的探活立即执行(网络切换快速自愈)', async () => {
+  const { s, probeCalls, advance } = makeScheduler({ verdict: 'ok' });
+  await s.runKeepaliveIfDue();   // 首探,nextKeepaliveAt = +25min
+  advance(60e3);                 // 1 分钟后
+  assert.strictEqual(await s.runKeepaliveIfDue(), false); // 未到期不探
+  s.pokeKeepalive();             // 代理报告隧道会话被拒
+  assert.strictEqual(s.nextKeepaliveAt, 0);
+  advance(1);
+  assert.strictEqual(await s.runKeepaliveIfDue(), true);  // 立即探
+  assert.strictEqual(probeCalls.length, 2);
+});
+
+test('pokeKeepalive:未启用保活时空操作', () => {
+  const s = new Scheduler({
+    config: { keepAliveIntervalMs: INTERVAL_MS },
+    readToken: () => null,
+    hasCredentials: () => false,
+    refresh: async () => ({}),
+    wakeup: { close() {} },
+    now: () => 12345,
+  });
+  s.pokeKeepalive();
+  assert.strictEqual(s.nextKeepaliveAt, 0); // 保持构造初值,未被改动
+});
+
 test("verdict 'invalid' + 重签抛 TWO_FACTOR_REQUIRED:上抛交给上层处理", async () => {
   const { s } = makeScheduler({
     verdict: 'invalid',

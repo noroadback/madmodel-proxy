@@ -37,9 +37,20 @@ function busyHint(payload, config) {
 }
 
 function createProxyService(deps) {
-  const { config, tokenState, upstreamClient } = deps;
+  const { config, tokenState, upstreamClient, onTunnelAuthLost } = deps;
   // 活跃上游请求数(进程保护,见 handleRequest 的 inflight 硬上限)
   let inflight = 0;
+
+  // 隧道会话被拒的快速自愈触发:隧道形态下上游 3xx(实测形态 302→/login,
+  // WebVPN 会话绑定来源网络,切网即死)→ 通知装配层(proxy.js 写 revive
+  // 标志,watch 的目录监听唤醒后 pokeKeepalive 立即探活重签)。节流在注入
+  // 方实现,core 只报告事件;直连形态(3xx 是门禁 307,非会话问题)不触发
+  function reportTunnelAuthLost(result) {
+    if (onTunnelAuthLost && config.tunnelMode &&
+      result.type === 'upstream-error' && result.status >= 300 && result.status < 400) {
+      onTunnelAuthLost();
+    }
+  }
 
   function logReq(req, status, started, size, note) {
     // method+path 进日志:排查"谁在打我"时区分 models 探活与 chat 请求
@@ -221,6 +232,7 @@ function createProxyService(deps) {
       return;
     }
     if (result.type === 'upstream-error') {
+      reportTunnelAuthLost(result);
       if (!ctx.sseHeadersSent()) {
         ctx.dumpFailed();
         const mapped = translateUpstreamError(result.body, result.raw, result.status, busyHint(payload, config));
@@ -333,6 +345,7 @@ function createProxyService(deps) {
       return;
     }
     if (result.type === 'upstream-error') {
+      reportTunnelAuthLost(result);
       ctx.dumpFailed();
       const mapped = translateUpstreamError(result.body, result.raw, result.status, busyHint(payload, config));
       logReq(req, mapped.http, started, size,

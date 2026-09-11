@@ -26,6 +26,22 @@ const { createProxyService } = require('./core/proxy-service');
 const { createHttpServer, createTokenCache, createTokenState } = require('./adapters/http-server');
 const { getTokenizer } = require('./core/tokenizer');
 const paths = require('./platform/paths');
+const { atomicWrite } = require('./platform/file-store');
+
+// 隧道会话失效的快速自愈:代理遇隧道 3xx(会话被拒)时写 revive 标志,watch
+// 的目录监听唤醒后立即探活重签——网络切换后 WebVPN 会话绑定失效的场景,
+// 自愈从"最长等 25 分钟常规保活"压到秒级。节流:10s 内至多写一次,请求
+// 风暴不放大为文件事件风暴;写失败由常规保活兜底
+let lastReviveAt = 0;
+function notifyTunnelAuthLost() {
+  const now = Date.now();
+  if (now - lastReviveAt < 10e3) return;
+  try {
+    atomicWrite(paths.TUNNEL_REVIVE, String(now));
+    lastReviveAt = now; // 写成功才占用节流窗口:写失败(磁盘满/权限)不吞掉
+                        // 10s 内的下一次尝试,只让常规保活兜底
+  } catch (e) { /* 写失败:常规保活兜底 */ }
+}
 
 // token 读取/缓存与状态判定先于 service 与 HTTP 层独立创建,再分别注入:
 // 依赖单向流动。此前 service 经闭包前向引用尚未创建的 httpServer(TDZ,
@@ -36,6 +52,7 @@ const service = createProxyService({
   config,
   tokenState,
   upstreamClient: createUpstreamClient(config),
+  onTunnelAuthLost: notifyTunnelAuthLost,
 });
 const httpServer = createHttpServer({ config, service, getToken });
 

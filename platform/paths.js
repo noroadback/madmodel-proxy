@@ -66,6 +66,10 @@ const TOKEN_FILE = path.join(STATE_DIR, 'token.json');
 const CREDS_FILE = process.env.MADMODEL_CREDS_FILE || path.join(STATE_DIR, 'creds.json');
 const WATCH_LOCK = path.join(STATE_DIR, 'watch.lock');
 const AUTH_LOCK = path.join(STATE_DIR, 'auth.lock');
+// 隧道 revive 标志(瞬态,不迁移):代理遇隧道会话被拒(302→/login)时写,
+// watch 的目录监听唤醒后立即探活重签——网络切换后 WebVPN 会话绑定失效的
+// 快速自愈通道,不等 25 分钟的常规保活周期
+const TUNNEL_REVIVE = path.join(STATE_DIR, 'tunnel-revive');
 
 // 面向用户的展示路径:真实绝对路径含用户名,不该进 401 响应体或控制台。
 // Windows 惯用 %USERPROFILE% 形态,Unix 惯用 ~ 形态;目录名取实际 STATE_DIR
@@ -78,6 +82,6 @@ function display(file) {
 }
 
 module.exports = {
-  STATE_DIR, TOKEN_FILE, CREDS_FILE, WATCH_LOCK, AUTH_LOCK,
+  STATE_DIR, TOKEN_FILE, CREDS_FILE, WATCH_LOCK, AUTH_LOCK, TUNNEL_REVIVE,
   display, migrateStateDir,
 };
