@@ -10,6 +10,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { jwtExpiresAt } = require('../madmodel-auth');
 const credentials = require('../platform/credentials');
 const { atomicWrite } = require('../platform/file-store');
@@ -30,6 +31,29 @@ function openAiError(res, status, message, type, extraHeaders) {
   sendJson(res, status, {
     error: { message, type: type || 'proxy_error', code: status },
   }, extraHeaders);
+}
+
+// ===== API Key 鉴权(可选) =====
+// 从请求提取 key:优先 Authorization: Bearer <key>,回退 x-api-key。
+function extractApiKey(req) {
+  const auth = req.headers['authorization'] || '';
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  if (m) return m[1].trim();
+  const x = req.headers['x-api-key'];
+  return x ? String(x).trim() : '';
+}
+
+// 时间恒定比较,防计时侧信道泄露 key 长度/前缀。任一 key 命中即通过。
+function apiKeyAccepted(presented, keys) {
+  if (!presented) return false;
+  const a = Buffer.from(presented);
+  let ok = false;
+  for (const k of keys) {
+    const b = Buffer.from(k);
+    // 长度不等时 timingSafeEqual 会抛;先判等长再比,避免异常与长度旁路
+    if (a.length === b.length && crypto.timingSafeEqual(a, b)) ok = true;
+  }
+  return ok;
 }
 
 // ===== token 热加载缓存 =====
@@ -201,6 +225,13 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
     '127.0.0.1', 'localhost', '[::1]',
   ]);
   const tokenState = createTokenState(getToken);
+  // 鉴权与监听形态:配了 apiKeys 即开启 Bearer 校验;非回环监听
+  // (PROXY_BIND_HOST=0.0.0.0 等)时 Host 白名单不再是边界(外部 IP 的 Host
+  // 头本就不在白名单),由 API Key 接管。两者独立:回环+key(本机多用户隔离)
+  // 与 对外+key(局域网鉴权)都成立。
+  const apiKeys = config.apiKeys || [];
+  const requireAuth = apiKeys.length > 0;
+  const loopbackOnly = ['127.0.0.1', 'localhost', '::1'].includes(config.host);
 
   const server = http.createServer((req, res) => {
     const started = Date.now();
@@ -210,19 +241,35 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
     req.on('error', () => {});
     res.on('error', () => {});
 
+    // 健康探测:免鉴权、免白名单(仅回 ok,不碰上游),供 Makefile/脚本探活
+    if (req.method === 'GET' && url === '/healthz') {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      return res.end('ok');
+    }
+
+    // API Key 鉴权(配了才校验)。放在最前:未授权请求不该看到白名单/端点细节。
+    if (requireAuth && !apiKeyAccepted(extractApiKey(req), apiKeys)) {
+      service.logReq(req, 401, started, 0, 'auth-rejected');
+      return openAiError(res, 401, 'API Key 无效或缺失(Authorization: Bearer <key> 或 x-api-key)', 'auth_error');
+    }
+
     // Host 白名单:防 DNS rebinding(外部域名解析到 127.0.0.1 后,浏览器借合法
     // Origin 跨域读本代理响应)。只认本机地址。早退路径同样记日志:这些是防御
-    // 被触发的信号,不留痕则威胁模型永远无法验证
+    // 被触发的信号,不留痕则威胁模型永远无法验证。
+    // 仅回环监听时启用——对外监听(0.0.0.0)时外部 IP 的 Host 头合法却不在
+    // 白名单,此时边界由上面的 API Key 鉴权承担(requireAuth 已在启动时强制)。
     const host = String(req.headers.host || '').toLowerCase();
-    if (!allowedHosts.has(host)) {
+    if (loopbackOnly && !allowedHosts.has(host)) {
       service.logReq(req, 403, started, 0, 'host-rejected');
       return openAiError(res, 403, 'Host 未获允许，请使用本机地址访问。');
     }
     // 浏览器 CSRF 缓解:恶意网页可用 no-cors POST 向本机端口盲发请求(Host
     // 是浏览器正确设置的,白名单防不住写入通道;浏览器对跨源 POST 必带
     // Origin)。非本机来源拒绝;非浏览器客户端(SDK/智能体)不发 Origin,
-    // 自然豁免;localhost 系页面(本地 Web UI)放行
-    if (req.headers.origin !== undefined) {
+    // 自然豁免;localhost 系页面(本地 Web UI)放行。
+    // 对外监听+已鉴权时跳过:合法的远程 SDK 客户端不发 Origin,而带 key 的
+    // 请求已通过鉴权,CSRF(依赖浏览器自动带凭据)在 key 模型下不适用。
+    if (loopbackOnly && req.headers.origin !== undefined) {
       let localOrigin = false;
       try {
         const h = new URL(req.headers.origin).hostname;
@@ -471,4 +518,4 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
   };
 }
 
-module.exports = { createHttpServer, createTokenCache, createTokenState, createCredentialWaiter };
+module.exports = { createHttpServer, createTokenCache, createTokenState, createCredentialWaiter, extractApiKey, apiKeyAccepted };

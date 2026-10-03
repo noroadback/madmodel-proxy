@@ -139,6 +139,8 @@ PROXY_PORT=8081 npm start
 |---|---|---|
 | `PROXY_PORT` | `8080` | 本地端口 |
 | `PROXY_UPSTREAM` | 按网络选择 | 完整上游 Chat Completions URL，启动时优先于网络选择。对话和 Bearer token 会发送到此地址，仅配置可信服务 |
+| `PROXY_BIND_HOST` | `127.0.0.1` | 监听地址。默认仅本机；设 `0.0.0.0` 对局域网开放。**非回环监听时必须配 `PROXY_API_KEYS`**（随附的 `scripts/service.sh` 会拒绝裸奔启动） |
+| `PROXY_API_KEYS` | 空（不鉴权） | 逗号分隔的 API Key。非空即开启鉴权：请求头 `Authorization: Bearer <key>` 或 `x-api-key: <key>`（时间恒定比较）。空时沿用「仅回环 + Host 白名单」原边界。`GET /healthz` 恒免鉴权 |
 | `PROXY_TOOL_FIX` | `1` | `0` 关闭文本工具调用补救 |
 | `PROXY_NO_UPDATE_CHECK` | 未设置 | `1` 关闭启动时的 GitHub 版本检查 |
 | `MADMODEL_STATE_DIR` | `~/.madmodel-proxy` | 凭据与状态目录 |

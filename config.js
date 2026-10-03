@@ -29,6 +29,21 @@ function numberEnv(name, fallback) {
 
 const PORT = numberEnv('PROXY_PORT', 8080);
 
+// 监听地址。默认 127.0.0.1(仅本机,历史行为不变)。设 PROXY_BIND_HOST=0.0.0.0
+// 可对局域网开放——此时**必须**配 PROXY_API_KEYS 才是安全的:非回环监听下,
+// Host 白名单不再是边界(外部 IP 的 Host 头本就不在白名单),鉴权取而代之。
+// 判定见 adapters/http-server.js 的 bindsNonLoopback / requireAuth。
+const BIND_HOST = process.env.PROXY_BIND_HOST || '127.0.0.1';
+
+// API Key 鉴权。逗号分隔的 key 列表;非空即开启 Bearer/x-api-key 校验(时间
+// 恒定比较)。空(默认)= 不鉴权,沿用"仅本机回环 + Host 白名单"的原边界。
+// 对外监听(PROXY_BIND_HOST 非回环)时强烈建议设置,否则任何能到达端口的人
+// 都能用。
+const API_KEYS = Object.freeze(
+  String(process.env.PROXY_API_KEYS || '')
+    .split(',').map(s => s.trim()).filter(Boolean)
+);
+
 // WebVPN 隧道默认上游:前缀从 madmodel-auth.js 导出(单一来源——上游 URL、
 // 保活地址推导、cookie 回传判定共用同一常量,复制串漂移会造成"上游是隧道
 // 但保活静默禁用"的错位)
@@ -125,8 +140,10 @@ const DEFAULT_LIMITS = Object.freeze({ contextWindow: 131072, maxOutputTokens: 6
 const TOOLS_UNSUPPORTED = Object.freeze(['qwen3.8-27b']);
 
 module.exports = Object.freeze({
-  host: '127.0.0.1',
+  host: BIND_HOST,
   port: PORT,
+  // API Key 列表(空=不鉴权)。adapters/http-server.js 据此决定是否校验。
+  apiKeys: API_KEYS,
   model: MODEL,
   models: Object.freeze([MODEL]),
   // 探测失败时的思考能力兜底(见上方 THINKING_FALLBACK 的说明)
