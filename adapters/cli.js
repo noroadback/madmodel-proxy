@@ -2,7 +2,7 @@
 // refresh-token.js 的命令分发与终端交互(提示、密码隐藏输入、状态展示)。
 // 认证业务在 auth-service.js,存取在 platform/,调度在 core/scheduler.js。
 // 命令名保持稳定: login / once / watch / status
-// (key 命令已随本地鉴权一并移除,保留一声友好提示)
+// API Key 通过环境变量配置，key 命令只提供指引。
 
 'use strict';
 
@@ -13,6 +13,7 @@ const credentials = require('../platform/credentials');
 const processLock = require('../platform/process-lock');
 const config = require('../config');
 const { isProxyRunning } = require('../core/proxy-status');
+const { localBaseUrl } = require('../core/listen-config');
 const { WATCH_LOCK, display } = require('../platform/paths');
 
 // 密码逐键输入的状态机(纯函数,便于测试)。原实现把这段逻辑内联在
@@ -199,10 +200,10 @@ async function cmdOnce() {
   console.log(`✅ token 已续期,有效期至 ${new Date(expiresAt).toLocaleString()}`);
 }
 
-// 一屏状态:代理/token/watch/key 四问四答。全部只读,可随时运行。
+// 一屏状态:代理、token、watch 与凭据。全部只读。
 async function cmdStatus() {
-  const proxyUp = await isProxyRunning(config.port);
-  console.log('代理: ' + (proxyUp ? `运行中 → http://127.0.0.1:${config.port}/v1` : '未运行（运行 npm start 启动）'));
+  const proxyUp = await isProxyRunning(config.port, undefined, config.host);
+  console.log('代理: ' + (proxyUp ? `运行中 → ${localBaseUrl(config)}/v1` : '未运行（运行 npm start 启动）'));
 
   // 2) token:三态口径与代理启动横幅一致
   const t = credentials.readToken();
@@ -222,7 +223,7 @@ async function cmdStatus() {
   console.log('watch 续期守护: ' + (watchAlive ? `运行中(PID ${lockPid})`
     : `未运行(随 npm start 启动${lockPid ? ';当前锁文件为死进程残留,下次启动自动接管' : ''})`));
 
-  // 4) 凭据(本地无鉴权,代理不设 key,客户端 API key 填任意值)
+  // 4) 学校登录凭据
   console.log('凭据: ' + (credentials.hasAccount() ? '已配置' : '未配置(node refresh-token.js login)'));
 }
 
@@ -283,7 +284,7 @@ async function runCli(argv) {
     else if (cmd === 'logout') await cmdLogout(argv.slice(1));
     else if (cmd === 'status') await cmdStatus();
     else if (cmd === 'key') {
-      console.log('代理本地无鉴权,已无 key 命令;客户端 API key 填任意值。');
+      console.log('请通过 PROXY_API_KEYS 配置代理密钥，设置后重启；未设置时仅支持本机免鉴权访问。');
     }
     else {
       console.log('用法: node refresh-token.js [login|once|watch|logout|status]');

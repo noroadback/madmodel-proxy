@@ -10,6 +10,8 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const { validateListenConfig } = require('../core/listen-config');
 const { jwtExpiresAt } = require('../madmodel-auth');
 const credentials = require('../platform/credentials');
 const { atomicWrite } = require('../platform/file-store');
@@ -30,6 +32,25 @@ function openAiError(res, status, message, type, extraHeaders) {
   sendJson(res, status, {
     error: { message, type: type || 'proxy_error', code: status },
   }, extraHeaders);
+}
+
+// Authorization 存在时不回退，避免两个头的含义冲突。
+function extractApiKey(req) {
+  if (req.headers.authorization !== undefined) {
+    return /^Bearer\s+(\S+)\s*$/i.exec(req.headers.authorization)?.[1] || '';
+  }
+  return typeof req.headers['x-api-key'] === 'string' ? req.headers['x-api-key'].trim() : '';
+}
+
+const keyDigest = key => crypto.createHash('sha256').update(key).digest();
+
+// 比较固定长度摘要，并检查所有配置密钥，不按匹配位置提前返回。
+function apiKeyAccepted(presented, digests) {
+  if (!presented) return false;
+  const digest = keyDigest(presented);
+  let accepted = 0;
+  for (const expected of digests) accepted |= Number(crypto.timingSafeEqual(digest, expected));
+  return accepted !== 0;
 }
 
 // ===== token 热加载缓存 =====
@@ -196,9 +217,13 @@ function createCredentialWaiter(getToken) {
 }
 
 function createHttpServer({ config, service, getToken, modelRegistry }) {
+  const { host: bindHost, apiKeys, loopbackOnly } = validateListenConfig(config);
+  const keyDigests = apiKeys.map(keyDigest);
+  const bindAuthority = bindHost.includes(':') ? `[${bindHost}]` : bindHost;
   const allowedHosts = new Set([
     `127.0.0.1:${config.port}`, `localhost:${config.port}`, `[::1]:${config.port}`,
     '127.0.0.1', 'localhost', '[::1]',
+    bindAuthority, `${bindAuthority}:${config.port}`,
   ]);
   const tokenState = createTokenState(getToken);
 
@@ -210,28 +235,33 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
     req.on('error', () => {});
     res.on('error', () => {});
 
-    // Host 白名单:防 DNS rebinding(外部域名解析到 127.0.0.1 后,浏览器借合法
-    // Origin 跨域读本代理响应)。只认本机地址。早退路径同样记日志:这些是防御
-    // 被触发的信号,不留痕则威胁模型永远无法验证
+    // 回环监听保留 Host 白名单；局域网请求由下面的密钥检查授权。
     const host = String(req.headers.host || '').toLowerCase();
-    if (!allowedHosts.has(host)) {
+    if (loopbackOnly && !allowedHosts.has(host)) {
       service.logReq(req, 403, started, 0, 'host-rejected');
       return openAiError(res, 403, 'Host 未获允许，请使用本机地址访问。');
     }
-    // 浏览器 CSRF 缓解:恶意网页可用 no-cors POST 向本机端口盲发请求(Host
-    // 是浏览器正确设置的,白名单防不住写入通道;浏览器对跨源 POST 必带
-    // Origin)。非本机来源拒绝;非浏览器客户端(SDK/智能体)不发 Origin,
-    // 自然豁免;localhost 系页面(本地 Web UI)放行
-    if (req.headers.origin !== undefined) {
+    // 回环模式拒绝外部网页；局域网模式仍需显式提交密钥，不开放 CORS。
+    if (loopbackOnly && req.headers.origin !== undefined) {
       let localOrigin = false;
       try {
         const h = new URL(req.headers.origin).hostname;
-        localOrigin = h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || h === '::1';
+        localOrigin = h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || h === bindAuthority;
       } catch (e) { /* 非法 Origin(含 null)按非本机拒绝 */ }
       if (!localOrigin) {
         service.logReq(req, 403, started, 0, 'origin-rejected');
         return openAiError(res, 403, '已拒绝外部网页请求，仅支持本地页面。');
       }
+    }
+
+    // 健康检查只公开本服务标识，不读取凭据、模型或上游状态。
+    if (req.method === 'GET' && url === '/healthz') {
+      return sendJson(res, 200, { status: 'ok', proxy: 'madmodel' });
+    }
+    if (keyDigests.length && !apiKeyAccepted(extractApiKey(req), keyDigests)) {
+      service.logReq(req, 401, started, 0, 'auth-rejected');
+      return openAiError(res, 401, 'API Key 缺失或无效，请检查客户端配置。', 'authentication_error',
+        { 'WWW-Authenticate': 'Bearer realm="madmodel"' });
     }
 
     // 伪造 models 端点(上游不存在该端点,返回 SPA HTML)。附带能力元数据:

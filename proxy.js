@@ -2,6 +2,9 @@
 'use strict';
 
 const config = require('./config');
+const { validateListenConfig, localBaseUrl } = require('./core/listen-config');
+try { validateListenConfig(config); }
+catch (error) { console.error(error.message); process.exit(1); }
 const { createUpstreamClient } = require('./core/upstream-client');
 const { createProxyService } = require('./core/proxy-service');
 const { createHttpServer, createTokenCache, createTokenState } = require('./adapters/http-server');
@@ -78,8 +81,12 @@ process.on('uncaughtException', e => {
 
 httpServer.server.listen(config.port, config.host, () => {
   const auth = httpServer.auth;
-  console.log(`服务已启动 http://${config.host}:${config.port}/v1`);
-  console.log('仅本机可用，API key 填任意非空值');
+  console.log(`服务已启动 ${localBaseUrl(config)}/v1`);
+  if (config.apiKeys.length) {
+    console.log(`已启用 API Key 鉴权，监听 ${config.host}`);
+  } else {
+    console.log('仅本机可用，API key 填任意非空值');
+  }
   const t = auth.getToken();
   if (t) {
     const remainMin = Math.round((t.expiresAt - Date.now()) / 60e3);

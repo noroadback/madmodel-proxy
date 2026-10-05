@@ -224,7 +224,7 @@ test('运行状态核验代理标识，不把其他 OpenAI 服务当成本代理
     [200, { proxy: 'madmodel' }, true], [500, { proxy: 'madmodel' }, false],
   ]) {
     assert.equal(await isProxyRunning(12345, async url => {
-      assert.equal(url, 'http://127.0.0.1:12345/');
+      assert.equal(url, 'http://127.0.0.1:12345/healthz');
       return { status, json: async () => body };
     }), expected);
   }
