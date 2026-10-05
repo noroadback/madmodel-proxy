@@ -8,6 +8,8 @@ tunnel-revive
 
 # 凭据与密钥(正常位于 %USERPROFILE%\.madmodel-proxy\,此为防御性兜底)
 api-key
+api-keys
+service.env
 token.json
 creds.json
 watch.lock

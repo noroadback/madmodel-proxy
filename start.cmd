@@ -46,12 +46,8 @@ if not exist "%USERPROFILE%\.madmodel-proxy\shortcut-created" (
 
 rem If OUR proxy already answers on the port, do not duplicate-start:
 rem show a health summary instead (proxy / token / watch / credentials).
-rem Probes GET /v1/models and looks for our own owned_by marker: another program
-rem merely listening on the port would be misreported as "already running".
-rem The marker is written by this proxy itself, so it survives upstream model
-rem renames -- a model-name prefix match would not (upstream dropped the
-rem DeepSeek-V4-Flash-0731 name on 2026-09-27 and now also serves qwen3.8-27b).
-node -e "fetch('http://127.0.0.1:%MADPORT%/', {signal:AbortSignal.timeout(2000)}).then(r=>r.json()).then(j=>{process.exit(j&&j.proxy==='madmodel'?0:1)}).catch(()=>process.exit(1))" >nul 2>&1
+rem Uses the shared health probe, including API-key mode and older proxies.
+node "%~dp0core\proxy-status.js" >nul 2>&1
 if %errorlevel%==0 (
   echo madmodel proxy is already running on port %MADPORT% - local status:
   node "%~dp0refresh-token.js" status

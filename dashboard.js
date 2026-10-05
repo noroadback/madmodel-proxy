@@ -6,6 +6,9 @@
 //   node refresh-token.js watch   与   node proxy.js   (行为与从前一致)
 'use strict';
 
+try { require('./core/listen-config').validateListenConfig(require('./config')); }
+catch (error) { console.error(error.message); process.exit(1); }
+
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -15,9 +18,14 @@ const { classifyChildExit } = require('./core/child-supervision');
 const { TOKEN_FILE } = require('./platform/paths');
 const {
   decide, readChoice, writeChoice, choiceFile, CAMPUS_UPSTREAM, MODE_CAMPUS, MODE_OFFCAMPUS,
-  HINT_MANUAL_GONE, PROMPT_LINES, chosenLines, normalizeArg, isCampusUpstream,
+  HINT_MANUAL_GONE, HINT_ENV_WINS, PROMPT_LINES, chosenLines, normalizeArg, isCampusUpstream,
 } = require('./network-choice');
 const pkg = require('./package.json');
+const argMode = normalizeArg(process.argv[2]);
+if (process.argv.length > 3 || (process.argv[2] && !argMode)) {
+  console.error('网络参数无效，请运行 npm start -- campus 或 npm start -- offcampus。');
+  process.exit(1);
+}
 
 const children = new Set();
 
@@ -187,7 +195,7 @@ function safeWriteChoice(mode) {
 function resolveNetworkScenario() {
   const d = decide({
     envUpstream: process.env.PROXY_UPSTREAM || '',
-    argMode: null,
+    argMode,
     choice: readChoice(choiceFile()),
   });
   if (d.record) safeWriteChoice(d.record);
@@ -195,6 +203,7 @@ function resolveNetworkScenario() {
   // 可见,否则 npm start 用户删掉变量后静默回隧道、无从知道覆盖已失效。
   // 文案复用 network-choice.js 的常量,不在此处再抄一份
   if (d.hint === 'manual-gone') for (const l of HINT_MANUAL_GONE) console.log(l);
+  if (d.hint === 'env-arg-ignored') for (const l of HINT_ENV_WINS) console.log(l);
   // 记录/参数给出的场景要真正生效——不能只打横幅。漏了这一步的后果是:
   // 用户选了校园网、记录也在,实际却仍走隧道,且没有任何提示
   if (d.action === 'set' && d.url) process.env.PROXY_UPSTREAM = d.url;
@@ -350,6 +359,7 @@ function shutdown() {
   setTimeout(() => process.exit(0), 1000).unref();
 }
 process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
 // 注:Windows 控制台的 Ctrl+C 会同时送达同一控制台的所有进程,子进程通常
 // 自行退出,上面的 kill 只是兜底;关窗则直接终止全部进程(无信号),watch
 // 锁靠"死 PID 自动接管"自愈——与从前直接关窗口的行为一致。

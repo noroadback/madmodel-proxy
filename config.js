@@ -29,6 +29,12 @@ function numberEnv(name, fallback) {
 
 const PORT = numberEnv('PROXY_PORT', 8080);
 
+// 非回环监听必须配置密钥，启动时由 core/listen-config.js 校验。
+const BIND_HOST = (process.env.PROXY_BIND_HOST || '127.0.0.1').trim().toLowerCase();
+const API_KEYS = Object.freeze(
+  [...new Set((process.env.PROXY_API_KEYS || '').split(',').map(s => s.trim()).filter(Boolean))]
+);
+
 // WebVPN 隧道默认上游:前缀从 madmodel-auth.js 导出(单一来源——上游 URL、
 // 保活地址推导、cookie 回传判定共用同一常量,复制串漂移会造成"上游是隧道
 // 但保活静默禁用"的错位)
@@ -125,8 +131,10 @@ const DEFAULT_LIMITS = Object.freeze({ contextWindow: 131072, maxOutputTokens: 6
 const TOOLS_UNSUPPORTED = Object.freeze(['qwen3.8-27b']);
 
 module.exports = Object.freeze({
-  host: '127.0.0.1',
+  host: BIND_HOST,
   port: PORT,
+  // API Key 列表(空=不鉴权)。adapters/http-server.js 据此决定是否校验。
+  apiKeys: API_KEYS,
   model: MODEL,
   models: Object.freeze([MODEL]),
   // 探测失败时的思考能力兜底(见上方 THINKING_FALLBACK 的说明)

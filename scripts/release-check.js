@@ -56,7 +56,7 @@ try {
 }
 
 // 3) 敏感文件不在 Git 跟踪列表(误提交即拒绝发布)
-const SENSITIVE = ['token.json', 'creds.json', 'api-key', 'last-failed-request.json',
+const SENSITIVE = ['token.json', 'creds.json', 'api-key', 'api-keys', 'service.env', 'last-failed-request.json',
   'watch.lock', 'auth.lock', 'frames.log', 'upstream-frames.log', '_proxy-run.log'];
 let tracked = null;
 try {

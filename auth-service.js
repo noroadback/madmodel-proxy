@@ -102,7 +102,7 @@ function stamp() {
 // 只支持停服后清理,不做代停(进程身份确认与停止顺序的复杂度留给真实
 // 需要时)。远端不撤销:学校侧登录状态活到自然过期(约 6 小时)
 async function logout() {
-  if (await isProxyRunning(config.port)) {
+  if (await isProxyRunning(config.port, undefined, config.host)) {
     throw new Error('代理仍在运行。请先用 Ctrl+C 停止代理与续期守护，再执行 logout');
   }
   // ② watch 在跑?(锁 PID 探活)
