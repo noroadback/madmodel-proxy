@@ -138,12 +138,26 @@ test('分词: 同文本重复计数一致(缓存路径)', () => {
 // 声明边界:本节验证的是"已覆盖输入上的等价性",不承诺捕获任何偏差;
 // 覆盖面为带种子的随机输入 + 显式同 rank 顺序用例。上游换分词器/改模板
 // 不在本测试检测范围(那需要重新跑 usage.prompt_tokens 对测)
-const { createTokenizer, _referenceBpe } = require('../core/tokenizer');
+const { createTokenizer } = require('../core/tokenizer');
+// 旧的数组扫描算法仅作为差分参照，不随产品模块加载。
+function referenceBpe(piece, mergeRank, vocab) {
+  const parts = Array.from(piece);
+  while (parts.length >= 2) {
+    let bestRank = Infinity, bestIdx = -1;
+    for (let i = 0; i + 1 < parts.length; i++) {
+      const rank = mergeRank.get(parts[i] + ' ' + parts[i + 1]);
+      if (rank !== undefined && rank < bestRank) { bestRank = rank; bestIdx = i; }
+    }
+    if (bestIdx < 0) break;
+    parts.splice(bestIdx, 2, parts[bestIdx] + parts[bestIdx + 1]);
+  }
+  return parts.filter(part => vocab.has(part)).length;
+}
 const fsMod = require('fs');
 const pathMod = require('path');
 const modelJson = JSON.parse(fsMod.readFileSync(
   pathMod.join(__dirname, '..', 'vendor', 'deepseek-tokenizer.json'), 'utf8'));
-const tkRef = createTokenizer(modelJson, { bpeImpl: _referenceBpe });
+const tkRef = createTokenizer(modelJson, { bpeImpl: referenceBpe });
 
 // mulberry32:带种子的 PRNG,失败可复现
 function mulberry32(seed) {

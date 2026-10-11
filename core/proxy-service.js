@@ -14,15 +14,6 @@ function stamp() {
   return new Date().toTimeString().slice(0, 8);
 }
 
-function busyHint(payload, contextWindow) {
-  return {
-    promptTokens: getTokenizer().countPromptTokens(payload),
-    tokenBudget: typeof payload.max_tokens === 'number' ? payload.max_tokens : 0,
-    reserveTokens: promptTokenReserve(payload),
-    contextWindow,
-  };
-}
-
 function recordFirstOutput(ctx, obj, thinkingField) {
   if (ctx.firstOutputAt !== undefined) return;
   const delta = obj?.choices?.[0]?.delta;
@@ -130,7 +121,7 @@ function createProxyService(deps) {
       return { error: { status: 400, message: e.message } };
     }
     const clientWantsStream = payload.stream === true;
-    payload.stream = true; // 对上游强制流式(绕 60s nginx 非流式超时)
+    payload.stream = true;
     if (!payload.stream_options || typeof payload.stream_options !== 'object' || Array.isArray(payload.stream_options)) {
       payload.stream_options = { include_usage: true };
     } else {
@@ -144,6 +135,7 @@ function createProxyService(deps) {
     return {
       payload, clientWantsStream,
       contextWindow: limits ? limits.contextWindow : config.contextWindow,
+      promptTokenMarginRatio: limits?.promptTokenMarginRatio || 0,
     };
   }
 
@@ -199,15 +191,20 @@ function createProxyService(deps) {
       logReq(ctx.req, 400, ctx.started, ctx.size, prepared.error.message);
       return ctx.sendError(400, prepared.error.message);
     }
-    const { payload, clientWantsStream, contextWindow } = prepared;
+    const { payload, clientWantsStream, contextWindow, promptTokenMarginRatio } = prepared;
 
     const promptTokens = getTokenizer().countPromptTokens(payload);
-    const fit = fitTokenBudget(promptTokens, payload, contextWindow);
+    const reserveTokens = promptTokenReserve(payload, promptTokens, promptTokenMarginRatio);
+    const fit = fitTokenBudget(promptTokens, payload, contextWindow, reserveTokens);
     if (!fit.ok) {
       logReq(ctx.req, 413, ctx.started, ctx.size, fit.message, payload.model);
       return ctx.sendError(413, fit.message);
     }
     const budgetNote = fit.note ? ` 输出预算 ${payload.max_tokens}` : '';
+    const budgetHint = {
+      promptTokens, reserveTokens, contextWindow,
+      tokenBudget: typeof payload.max_tokens === 'number' ? payload.max_tokens : 0,
+    };
 
     const ac = ctx.abortController;
     let inflightHeld = false;
@@ -226,8 +223,8 @@ function createProxyService(deps) {
     if (!hold()) return;
     try {
       const attempt = a => clientWantsStream
-        ? streamPassthrough(ctx, payload, a, extraHeaders, budgetNote, ac, contextWindow)
-        : aggregateResponse(ctx, payload, a, extraHeaders, budgetNote, ac, contextWindow);
+        ? streamPassthrough(ctx, payload, a, extraHeaders, budgetNote, ac, budgetHint)
+        : aggregateResponse(ctx, payload, a, extraHeaders, budgetNote, ac, budgetHint);
       let r = await attempt(auth);
       if (r && r.retryAuth) {
         if (config.tunnelMode && waitForCredentials) {
@@ -288,7 +285,7 @@ function createProxyService(deps) {
     ctx.endResponse();
   }
 
-  async function streamPassthrough(ctx, payload, auth, extraHeaders, budgetNote, ac, contextWindow) {
+  async function streamPassthrough(ctx, payload, auth, extraHeaders, budgetNote, ac, budgetHint) {
     const { req, started, size } = ctx;
     const servedModel = payload.model;
     // 思考即时发送；正文与收尾暂存，确认无需补救或解析结束后发送。
@@ -365,7 +362,7 @@ function createProxyService(deps) {
       }
       if (!ctx.sseHeadersSent()) {
         ctx.dumpFailed();
-        const mapped = translateUpstreamError(result.body, result.raw, result.status, busyHint(payload, contextWindow));
+        const mapped = translateUpstreamError(result.body, result.raw, result.status, budgetHint);
         logReq(req, mapped.http, started, size, mapped.message, servedModel);
         return ctx.sendError(mapped.http, mapped.message, 'upstream_error', errorHeaders(result, mapped.http, extraHeaders));
       }
@@ -452,7 +449,7 @@ function createProxyService(deps) {
     }
   }
 
-  async function aggregateResponse(ctx, payload, auth, extraHeaders, budgetNote, ac, contextWindow) {
+  async function aggregateResponse(ctx, payload, auth, extraHeaders, budgetNote, ac, budgetHint) {
     const { req, started, size } = ctx;
     const aggMeta = metaFor(payload.model);
     const aggThinkingField = aggMeta && typeof aggMeta.thinkingField === 'string' ? aggMeta.thinkingField : null;
@@ -490,7 +487,7 @@ function createProxyService(deps) {
         return { retryAuth: true };
       }
       ctx.dumpFailed();
-      const mapped = translateUpstreamError(result.body, result.raw, result.status, busyHint(payload, contextWindow));
+      const mapped = translateUpstreamError(result.body, result.raw, result.status, budgetHint);
       logReq(req, mapped.http, started, size, mapped.message, payload.model);
       return ctx.sendError(mapped.http, mapped.message, 'upstream_error', errorHeaders(result, mapped.http, extraHeaders));
     }

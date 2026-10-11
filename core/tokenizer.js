@@ -1,19 +1,6 @@
-// core/tokenizer.js
-// DeepSeek 分词器的本地精确计 token。算法是纯逻辑,但**加载期会读词表**
-// (vendor/deepseek-tokenizer.json,7.8MB,首次 getTokenizer 时读入并建索引)
-// ——与同目录其他模块不同,本模块接触 fs,刻意为之:词表必须随仓库分发,
-// 不能依赖网络。除此之外无外部依赖、无 I/O。
-// 2026-09-10 实测确认学校
-// madmodel 的 DeepSeek-V4-Flash-0731 沿用 DeepSeek-V3 公开分词器
-// (HuggingFace,MIT,vendor/deepseek-tokenizer.json):本地计数与上游
-// usage.prompt_tokens 在 24 万 token 级 payload 上逐个吻合,差异仅为
-// chat 模板固定开销(下方 countPromptTokens 内校准)。
-// 上游据此分词校验 prompt+max_tokens ≤ 262,144(core/proxy-service.js
-// 预检门),本模块让预检从估算变为精确。
-// 算法:byte-level BPE——三段 pre-tokenizer(数字 1-3 位/CJK 段/GPT-2 式
-// 主正则)切 piece,每 piece 按 merges 优先级贪心合并,查词表计数。
-// 两级缓存:piece 级(BPE 结果)与文本级(整段 content),增量会话里
-// 旧消息全部命中缓存,只有新增内容真正参与计算。
+// 使用随包分发的 DeepSeek 词表估算文本 token，不依赖网络。
+// byte-level BPE 配合片段与整段缓存，复用历史消息的计数。
+// 不同模型、模板和多模态输入会产生偏差；预算余量由 payload.js 处理。
 
 'use strict';
 
@@ -42,7 +29,7 @@ const TEXT_CACHE_CHARS = 8 * 1024 * 1024;
 // ---- BPE 合并的实现(模块级,签名为 (piece, mergeRank, vocab) -> token 数) ----
 
 // 堆式实现(1.8.1 起的生产路径):链表 + 最小堆,整体 O(n log n)。
-// 正确性约束(与差分参照 _referenceBpe 对齐,验证见 test/tokenizer.test.js):
+// 正确性约束(与测试中的旧算法对照，见 test/tokenizer.test.js):
 //   - 每次合并取 merge rank 最小的相邻对,同 rank 取最左出现。堆排序键为
 //     (rank, 左节点票据),票据由存活的左节点继承,恒等于该节点最左成分
 //     字符的初始位置——链表顺序不变,小票据即靠左
@@ -119,23 +106,6 @@ function heapBpe(piece, mergeRank, vocab) {
   return c;
 }
 
-// 差分测试参照:1.8.1 之前的实现(数组全扫描 + splice,最坏 O(n²))。
-// 仅供 test/tokenizer.test.js 注入 createTokenizer 做等价性对照,
-// 生产路径不得使用
-function _referenceBpe(piece, mergeRank, vocab) {
-  const parts = Array.from(piece);
-  while (parts.length >= 2) {
-    let bestRank = Infinity, bestIdx = -1;
-    for (let i = 0; i + 1 < parts.length; i++) {
-      const r = mergeRank.get(parts[i] + ' ' + parts[i + 1]);
-      if (r !== undefined && r < bestRank) { bestRank = r; bestIdx = i; }
-    }
-    if (bestIdx < 0) break;
-    parts.splice(bestIdx, 2, parts[bestIdx] + parts[bestIdx + 1]);
-  }
-  return parts.filter(p => vocab.has(p)).length;
-}
-
 function createTokenizer(model, opts = {}) {
   const byteToUni = buildByteToUni();
   const mergeRank = new Map(); // "a b"(byte-level 字符对) -> 合并优先级
@@ -164,7 +134,7 @@ function createTokenizer(model, opts = {}) {
 
   const pieceCache = new Map(); // piece(byte-level 映射后) -> token 数
   // BPE 实现可注入(opts.bpeImpl,签名 (piece, mergeRank, vocab) -> token 数):
-  // 默认堆式,测试注入 _referenceBpe(旧算法)做差分等价验证
+  // 默认堆式，测试可注入旧算法做差分验证。
   const bpeImpl = typeof opts.bpeImpl === 'function' ? opts.bpeImpl : heapBpe;
   function bpeCount(piece) {
     let c = pieceCache.get(piece);
@@ -207,14 +177,7 @@ function createTokenizer(model, opts = {}) {
   }
 
   // 单条消息的可计内容:content 为字符串或 OpenAI 分段数组。
-  // **只计文本段,图片段计 0**——这是计量下界,不是准确值:目标模型
-  // DeepSeek-V4-Flash-Vision-Exp 支持视觉,图片会真的进上下文并消耗 token
-  // (2026-09-27 实测:64x64 图上游报 123 prompt_tokens,其中图贡献约 116;
-  // 本地算式对这个 payload 只给 7)。故含图请求的 promptTokens 偏低,
-  // fitTokenBudget 可能放行本应本地 413 的请求——兜底是 config.bodyLimit
-  // (950KB)先挡住超大图,且真超限时 core/errors.js 的 busyHint 复判给 413
-  // 而非含糊的 429(不会无限重试)。为图片段补一个保守常数会让纯文本请求
-  // 也背上虚高成本,故不做;此缺口如实记录于此
+  // 这里只计文本与工具字段，图片余量在 payload.js 中单独预留。
   function countMessage(m) {
     const c = m?.content;
     let total = typeof c === 'string' ? countText(c)
@@ -268,4 +231,4 @@ function getTokenizer() {
   return defaultTokenizer;
 }
 
-module.exports = { createTokenizer, getTokenizer, _referenceBpe };
+module.exports = { createTokenizer, getTokenizer };

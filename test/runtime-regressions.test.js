@@ -68,6 +68,17 @@ async function run(body, responses, overrides = {}) {
 }
 
 for (const stream of [false, true]) {
+  test(`Qwen 图文预算与繁忙提示共用余量，流式=${stream}`, async () => {
+    const { ctx, seen } = await run({ stream, max_tokens: 262144, messages: [
+      { role: 'user', content: [{ type: 'text', text: 'hi' },
+        { type: 'image_url', image_url: { url: 'https://example.invalid/review.png' } }] },
+    ] }, [{ type: 'upstream-error', status: 200, body: { errorMessage: '服务器繁忙' }, raw: '' }]);
+    assert.strictEqual(seen.length, 1);
+    assert.ok(seen[0].max_tokens < 246000, '图像余量应进入实际发送的预算');
+    assert.strictEqual(ctx.out.status, 429);
+    assert.match(ctx.out.message, /接近上下文上限/);
+  });
+
   for (const transport of ['stream', 'completion']) {
     test(`完整变体标记直接恢复，客户端流式=${stream}，上游=${transport}`, async () => {
       const { ctx, seen } = await run({ stream, tools }, [{ type: transport, body: completion(markup('Write')) }]);

@@ -1,6 +1,6 @@
 // core/upstream-client.js
-// 上游转发核心:恒以流式请求上游(绕 nginx 非流式 60s 超时;透传或聚合由调用方
-// 决定)。整个生命周期由一个 AbortController 管理;header / idle / total 三类
+// 上游转发核心，流式或非流式由调用方指定。
+// 整个生命周期由一个 AbortController 管理；header / idle / total 三类
 // 超时在统一收尾路径清理;外部取消立即中止 fetch、reader 与全部计时器。
 // 不写日志、不写 HTTP response、不拼接 completion、不判断客户端是否流式。
 //
@@ -81,10 +81,7 @@ function createUpstreamClient(config) {
     upstreamJsonBodyLimit, upstreamSseTotalLimit, sseLineLimit,
   } = config;
 
-  // headerTimeoutMs 可由调用方覆盖:工具调用补救的非流式重发需要比常规请求
-  // 更长的头超时——常规 streamIdle/header 超时是按"绕学校 60s 网关"设计的,
-  // 而补救重发是在**已经失败**的路径上补一次,值得多等(实测冷启动首字节可到
-  // 70.5s,与默认 75s 头超时贴得太近,冷启动时会被误掐,导致补救取不到内容)
+  // 工具补救可用独立预算覆盖响应头超时；常规请求使用配置值。
   function request({ payload, token, cookie, signal, onChunk, onOpen, headerTimeoutMs }) {
     const headerTimeout = Number.isFinite(headerTimeoutMs) ? headerTimeoutMs : upstreamHeaderTimeout;
     return new Promise((resolve) => {
@@ -132,10 +129,7 @@ function createUpstreamClient(config) {
           finish({ type: 'timeout', phase: 'idle' });
         }, streamIdleTimeout);
       };
-      // 响应头超时:TCP/TLS/代理层挂住时放弃,不长期占用并发槽
-      // (空闲计时器只覆盖"收到响应后";这里覆盖"发出请求到响应头"的窗口)
-      // 默认 upstreamHeaderTimeout(75s,高于学校网关 60s);补救重发可经
-      // headerTimeoutMs 覆盖(见 request 参数注释)
+      // 响应头超时覆盖连接、上传及等待响应头；收到头后由 idle / total 接管。
       headerTimer = setTimeout(() => {
         lifecycle.abort(); // abort() 无抛出路径;中止尚未建立的连接
         cancelBody();

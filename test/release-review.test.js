@@ -156,6 +156,7 @@ test('管道一次送入两行凭据仍能完成登录输入', () => {
     require('./adapters/cli').runCli(['login']);`;
   const out = execFileSync(process.execPath, ['-e', source], {
     cwd: require('path').resolve(__dirname, '..'), input: 'sample\n fake password \n', encoding: 'utf8', timeout: 5000,
+    env: { ...process.env, MSYSTEM: '', MINGW_PREFIX: '', TERM_PROGRAM: '' },
   });
   assert.match(out, /token 已获取/);
 });

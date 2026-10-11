@@ -159,16 +159,16 @@ test('failed-stream: 截断(truncated)形态', () => {
   assert.ok(d.message.includes('[DONE]'));
 });
 
-// ---- 截断两形态(1.9.2,R2):零字节(首帧都没等到)与中途截断的处置不同,
-// 共用 GATEWAY_IDLE_MS(学校网关读空闲超时实测 60.0~60.1s)作分界 ----
-test('截断两形态: 零字节且等待达网关墙 → 首字节文案(维护者定稿:只说事实与处置)', () => {
+// 零字节与中途截断分别提示，只描述观测到的等待与断流。
+test('截断两形态: 零字节且长时间等待 → 首字节文案', () => {
   const d = describeFailedStream(
     { type: 'protocol-error', reason: 'truncated', idleMs: 61_400, sawBytes: false }, 'stream', CFG);
   assert.strictEqual(d.note, 'stream-truncated');
   assert.ok(d.message.includes('未产出首字节'), d.message);
-  assert.ok(d.message.includes('等待后重试'), d.message);
+  assert.ok(d.message.includes('已等待 61s'), d.message);
+  assert.ok(d.message.includes('重试'), d.message);
   assert.ok(d.message.includes('缩短对话'), d.message);
-  // 定稿文案不再带秒数/网关归因/直连建议——排障信息由日志的 idle=Ns 承载
+  assert.ok(!d.message.includes('网关'), d.message);
   assert.ok(!d.message.includes('PROXY_UPSTREAM'), d.message);
 });
 
@@ -179,7 +179,7 @@ test('截断两形态: 中途截断 → 距上一帧时长 + 已交付 KB + 可�
   assert.strictEqual(d.note, 'stream-truncated');
   assert.ok(d.message.includes('截断'), d.message);          // README FAQ 按"截断"检索
   assert.ok(d.message.includes('距上一帧 60s'), d.message);
-  assert.ok(d.message.includes('疑似学校网关 60 秒超时'), d.message);
+  assert.ok(!d.message.includes('网关'), d.message);
   assert.ok(d.message.includes('已发送 12.1 KB'), d.message);
   assert.ok(d.message.includes('重试'), d.message);
 });
@@ -193,18 +193,18 @@ test('截断两形态: 中途截断但无交付字节(聚合路径)不含 KB 句
   assert.ok(d.message.includes('重试'), d.message);
 });
 
-test('截断两形态: 中途截断但静默未达网关墙 → 连接中断,不带网关归因', () => {
+test('截断两形态: 中途截断且静默较短 → 连接中断', () => {
   const d = describeFailedStream(
     { type: 'protocol-error', reason: 'truncated', idleMs: 5_000, sawBytes: true }, 'stream', CFG, 4_096);
   assert.ok(d.message.includes('距上一帧 5s 后连接中断'), d.message);
   assert.ok(d.message.includes('重试'), d.message);
-  assert.ok(!d.message.includes('网关'), '短静默的中途截断不是网关读空闲墙,不得归因网关');
+  assert.ok(!d.message.includes('网关'), d.message);
 });
 
-test('截断两形态: 零字节但未达网关墙(连接层早夭)不带网关归因', () => {
+test('截断两形态: 等待首字节时较早断开', () => {
   const d = describeFailedStream(
     { type: 'protocol-error', reason: 'truncated', idleMs: 1_200, sawBytes: false }, 'agg', CFG);
-  assert.ok(d.message.includes('等待首字节 1s'), d.message);
+  assert.ok(d.message.includes('未产出首字节（已等待 1s）'), d.message);
   assert.ok(!d.message.includes('网关'), d.message);
 });
 

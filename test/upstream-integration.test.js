@@ -26,7 +26,7 @@ process.env.PROXY_TOKEN_FILE = TOKEN_FILE;
 // 隧道形态验证(生产中该路径只在默认隧道上游下可达)
 process.env.PROXY_RETRY_WAIT_MS = '2000';
 process.env.MADMODEL_FORCE_TUNNEL_MODE = '1';
-// 空闲守卫压到 1.2s(默认 65s 见 config.streamIdleTimeout):R3 的背压回归
+// 空闲守卫压到 1.2s(默认值见 config.streamIdleTimeout):R3 的背压回归
 // 用例要靠"停读时长 > 阈值"来验证守卫不把背压静默计入上游空闲,1.2s 让
 // 用例秒级完成。其余用例的替身上游都是即时应答,不受此阈值影响
 process.env.PROXY_IDLE_MS = '1200';

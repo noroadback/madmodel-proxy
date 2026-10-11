@@ -60,9 +60,6 @@ function translateUpstreamError(bodyObj, raw, status, busyHint) {
   return { http: 502, message: `无法识别上游响应: ${String(raw || '').slice(0, 200)}` };
 }
 
-// 60 秒来自已观察到的网关行为，只用于疑似超时提示。
-const GATEWAY_IDLE_MS = 60e3;
-
 function describeFailedStream(result, notePrefix, config, sentBytes) {
   if (result.type === 'protocol-error' && result.reason === 'truncated') {
     const note = `${notePrefix}-truncated`;
@@ -74,20 +71,13 @@ function describeFailedStream(result, notePrefix, config, sentBytes) {
     const sawBytes = typeof result.sawBytes === 'boolean'
       ? result.sawBytes
       : !(Number.isFinite(result.elapsedMs) && idleMs >= result.elapsedMs);
-    if (!sawBytes && idleMs >= GATEWAY_IDLE_MS) {
-      return { note, message:
-        '上游未产出首字节，请等待后重试或缩短对话。' };
-    }
     if (sawBytes) {
       const delivered = typeof sentBytes === 'number' && sentBytes > 0
         ? `已发送 ${(sentBytes / 1024).toFixed(1)} KB，请重试。`
         : '请重试。';
-      if (idleMs >= GATEWAY_IDLE_MS) {
-        return { note, message: `上游流被截断(距上一帧 ${idleS}s,疑似学校网关 60 秒超时)。${delivered}` };
-      }
-      return { note, message: `上游流被截断(距上一帧 ${idleS}s 后连接中断)。${delivered}` };
+      return { note, message: `上游流被截断（距上一帧 ${idleS}s 后连接中断）。${delivered}` };
     }
-    return { note, message: `等待首字节 ${idleS}s 后连接中断，请重试。` };
+    return { note, message: `上游未产出首字节（已等待 ${idleS}s），连接中断，请重试或缩短对话。` };
   }
   if (result.type === 'protocol-error') {
     return { note: `${notePrefix}-invalid`, message: result.message || '上游 SSE 协议错误' };

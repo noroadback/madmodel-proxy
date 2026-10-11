@@ -107,7 +107,16 @@ function applyPasswordKeys(buffer, chunk, escState) {
   };
 }
 
+// Mintty 可能把交互输入暴露为管道，Node 无法关闭终端回显。
+function validatePasswordTerminal(platform = process.platform, isTTY = process.stdin.isTTY, env = process.env) {
+  if (platform === 'win32' && !isTTY &&
+      (env.MSYSTEM || env.MINGW_PREFIX || env.TERM_PROGRAM?.toLowerCase() === 'mintty')) {
+    throw new Error('当前 Git Bash 终端无法保证密码隐藏。请在 PowerShell 或 CMD 中运行 npm run login。');
+  }
+}
+
 async function promptCredentials() {
+  validatePasswordTerminal();
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const lines = process.stdin.isTTY ? null : rl[Symbol.asyncIterator]();
   const ask = async q => {
@@ -163,11 +172,7 @@ async function promptCredentials() {
       process.stdin.on('data', onData);
     });
   } else {
-    // 管道环境:输入内容不经过终端,无回显问题。readline 预读缓冲了整个
-    // stdin,必须在 readline 上按行读(绕开它的裸监听拿不到被缓冲的数据,
-    // 且 rl.close 在管道模式会直接结束输入流——曾导致管道 login 挂死)
-    // 管道输入在 Windows 下常带 CRLF 的 \r;只剥 \r 不 trim——首尾空格是
-    // 合法密码字符,与 TTY 路径(原样保留)保持一致
+    // 管道输入沿用 readline 的预读缓冲；首尾空格是合法密码字符。
     password = (await ask('统一认证密码: ')).replace(/\r$/, '');
   }
   rl.close(); // 凭据都拿到后再释放 stdin
@@ -305,4 +310,4 @@ async function runCli(argv) {
   }
 }
 
-module.exports = { runCli, storageLabel, applyPasswordKeys };
+module.exports = { runCli, storageLabel, applyPasswordKeys, validatePasswordTerminal };

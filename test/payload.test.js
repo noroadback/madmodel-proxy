@@ -466,6 +466,41 @@ test('预算适配: DSH 的 57 工具历史请求不再超过真实上游窗口'
 // 实测边界(经代理逐值探测,本地 prompt=5 时):262103 ✅ / 262104 ❌
 const config = require('../config');
 
+test('Qwen 长文本校准样本的输出预算为实际输入保留空间', () => {
+  // 2026-10-10 合成英文长文本：本地 62,017，上游 70,917。
+  const { promptTokenReserve } = require('../core/payload');
+  const limits = config.limitsFor('qwen3.8-27b');
+  const payload = { max_tokens: limits.maxOutputTokens };
+  const reserve = promptTokenReserve(payload, 62017, limits.promptTokenMarginRatio);
+  assert.strictEqual(fitTokenBudget(62017, payload, limits.contextWindow, reserve).ok, true);
+  assert.ok(70917 + payload.max_tokens < limits.contextWindow);
+  assert.ok(payload.max_tokens > 180000, '只收缩估算余量，不设置固定的小输出上限');
+
+  const ds = { max_tokens: 1048576 };
+  const dsLimits = config.limitsFor('DeepSeek-V4.1-Flash');
+  const dsReserve = promptTokenReserve(ds, 62017, dsLimits.promptTokenMarginRatio);
+  fitTokenBudget(62017, ds, dsLimits.contextWindow, dsReserve);
+  assert.strictEqual(ds.max_tokens, 1048576 - 62017 - CONTEXT_RESERVE_TOKENS);
+});
+
+test('图片按张预留上下文，不影响纯文本和未指定的输出预算', () => {
+  const { promptTokenReserve, IMAGE_RESERVE_TOKENS } = require('../core/payload');
+  const text = { max_tokens: 262000, messages: [{ role: 'user', content: 'hi' }] };
+  const images = { max_tokens: 262000, messages: [{ role: 'user', content: [
+    { type: 'text', text: 'hi' },
+    { type: 'image_url', image_url: { url: 'data:image/png;base64,fixture' } },
+    { type: 'image_url', image_url: { url: 'https://example.invalid/image.png' } },
+  ] }] };
+  assert.strictEqual(promptTokenReserve(text), CONTEXT_RESERVE_TOKENS);
+  assert.strictEqual(promptTokenReserve(images), CONTEXT_RESERVE_TOKENS + 2 * IMAGE_RESERVE_TOKENS);
+  assert.strictEqual(fitTokenBudget(21, images, 262144).ok, true);
+  // 2048×2048 图片单张实测约 4,096 图像 token，这里按两张检查。
+  assert.ok(8192 + 21 + images.max_tokens < 262144);
+  delete images.max_tokens;
+  assert.strictEqual(fitTokenBudget(21, images, 262144).ok, true);
+  assert.strictEqual(images.max_tokens, undefined);
+});
+
 test('逐模型上限: qwen 的值必须低于实测撞墙值 262104', () => {
   const lim = config.limitsFor('qwen3.8-27b');
   assert.ok(lim.maxOutputTokens < 262104,

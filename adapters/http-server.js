@@ -96,8 +96,8 @@ function createTokenCache(config, { now = Date.now, readToken = credentials.read
 // ===== 请求体读取 =====
 // Content-Length 预检 + chunked 读取 + 大小限制 + 完成时限。错误带 code/note,
 // 由本层直接映射为 HTTP 响应(读取失败时业务层尚未介入)。
-function bodyLimitMessage(size, limit) {
-  return `请求体 ${(size / 1024).toFixed(0)} KB 超过本地上限 ${(limit / 1024).toFixed(0)} KB，请缩小图片或缩短对话。`;
+function bodyLimitMessage(limit) {
+  return `请求体超过本地 ${limit / 1048576} MiB 上限，请缩小图片或缩短对话。`;
 }
 
 function readBody(req, limit, timeout) {
@@ -122,7 +122,7 @@ function readBody(req, limit, timeout) {
       if (size > limit) {
         aborted = true;
         cleanup();
-        const e = new Error(bodyLimitMessage(size, limit));
+        const e = new Error(bodyLimitMessage(limit));
         e.code = 'BODY_TOO_LARGE';
         e.size = size;
         e.note = 'body-overflow';
@@ -162,7 +162,7 @@ async function readChatBody(req, config) {
   // Content-Length 预检:超限在收任何 body 字节前就拒绝,不陪慢速攻击者耗资源
   const declaredLen = Number(req.headers['content-length']);
   if (Number.isFinite(declaredLen) && declaredLen > config.bodyLimit) {
-    const e = new Error(bodyLimitMessage(declaredLen, config.bodyLimit));
+    const e = new Error(bodyLimitMessage(config.bodyLimit));
     e.code = 'BODY_TOO_LARGE';
     e.size = declaredLen;
     e.note = 'cl-precheck';
