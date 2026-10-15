@@ -1025,6 +1025,26 @@
       "count": 1,
       "detail": "auto",
       "imageTokens": 16292
+    },
+    {
+      "model": "qwen3.8-27b",
+      "width": 320,
+      "height": 640,
+      "count": 1,
+      "detail": "auto",
+      "imageTokens": 202,
+      "promptTokens": 217,
+      "baselinePromptTokens": 15
+    },
+    {
+      "model": "qwen3.8-27b",
+      "width": 320,
+      "height": 640,
+      "count": 2,
+      "detail": "auto",
+      "imageTokens": 404,
+      "promptTokens": 419,
+      "baselinePromptTokens": 15
     }
   ]
 }

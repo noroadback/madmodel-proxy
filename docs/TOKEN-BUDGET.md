@@ -37,9 +37,9 @@ JPEG 的 EXIF 方向 5–8 会交换逻辑宽高。PNG 在首个 IDAT 前发现 
 - DeepSeek 使用官方仓库固定版本 [`5254448103b6254fc646dacbca1cbbf20e9216c1`](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/tree/5254448103b6254fc646dacbca1cbbf20e9216c1) 的 [`inference/image_processor.py`](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/5254448103b6254fc646dacbca1cbbf20e9216c1/inference/image_processor.py) 和 [`inference/config.json`](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/5254448103b6254fc646dacbca1cbbf20e9216c1/inference/config.json)。
 - Qwen 使用官方仓库固定版本 [`1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` 的预处理配置](https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/preprocessor_config.json)，以及 Transformers `v4.57.1` 对应提交 [`8cb5963cc22174954e7dca2c0a3320b7dc2f4edc` 的 `smart_resize`](https://github.com/huggingface/transformers/blob/8cb5963cc22174954e7dca2c0a3320b7dc2f4edc/src/transformers/models/qwen2_vl/image_processing_qwen2_vl.py#L54-L80)。[调用处](https://github.com/huggingface/transformers/blob/8cb5963cc22174954e7dca2c0a3320b7dc2f4edc/src/transformers/models/qwen2_vl/image_processing_qwen2_vl_fast.py#L206-L211)将配置中的 `shortest_edge`、`longest_edge` 作为像素面积上下限；[Qwen3VLProcessor](https://github.com/huggingface/transformers/blob/8cb5963cc22174954e7dca2c0a3320b7dc2f4edc/src/transformers/models/qwen3_vl/processing_qwen3_vl.py#L186-L194)按网格与 merge size 计算视觉占位数量。
 
-本轮新增 112 次 API 请求均成功。其中 31 次先记录预测再发送请求的独立验证全部匹配，覆盖未参与推导的尺寸、`detail` 和多图请求。连同历史，155 条用于公式回归的含图记录全部匹配，不包含无图基线；按模型、尺寸、张数和 `detail` 去重后的 128 条实测观测保存在 [测试资料](../test/fixtures/vision-token-observations.json)。内容、压缩程度和 PNG/JPEG/WebP 格式变化未改变所测同尺寸图片的计数。
+发布前新增 112 次 API 请求均成功。其中 31 次先记录预测再发送请求的独立验证全部匹配，覆盖未参与推导的尺寸、`detail` 和多图请求。连同历史，155 条用于公式回归的含图记录全部匹配，不包含无图基线；按模型、尺寸、张数和 `detail` 去重后，发布时保留 128 条实测观测。内容、压缩程度和 PNG/JPEG/WebP 格式变化未改变所测同尺寸图片的计数。发布后补测另增两条观测，当前 [测试资料](../test/fixtures/vision-token-observations.json) 共 130 条。
 
-下表中心计数均与实测一致，均包含每图起止两个 token。DeepSeek 使用上游独立的图片用量字段；Qwen 未返回独立图片字段，按固定 `Reply OK.` 请求的总输入减去 15 token 文本与模板基线取得。
+下表中心计数均与实测一致，均包含每图起止两个 token，不包含额外的每图 8 token 软余量。DeepSeek 使用上游独立的图片用量字段；Qwen 未返回独立图片字段，按固定 `Reply OK.` 请求的总输入减去 15 token 文本与模板基线取得。
 
 | 宽 × 高 | DeepSeek 图片计数 | Qwen 图片计数 |
 |---|---:|---:|
@@ -49,8 +49,10 @@ JPEG 的 EXIF 方向 5–8 会交换逻辑宽高。PNG 在首个 IDAT 前发现 
 | 1024 × 768 | 496 | 770 |
 | 1024 × 1024 | 652 | 1026 |
 | 4096 × 4096 | 994 | 16386 |
-| 320 × 640 | 211 | 未测 |
+| 320 × 640 | 211 | 202 |
 | 910 × 1287 | 715 | 1122 |
+
+发布后于 2026-10-15 补测 Qwen 的 320 × 640 PNG。通过运行中的 v1.10.6 代理请求 `qwen3.8-27b`，关闭思考、`detail: auto`、`max_tokens: 8`，提示固定为 `Reply OK.`。请求前已记录公式预测，无图、单图、双图 3 次请求均返回 HTTP 200，上游 `usage.prompt_tokens` 分别为 15、217、419。扣除实测的 15 token 文本与模板基线，图片计数分别为 202、404，与预测一致。单图计入软余量后的本地图片预算为 210 token；该余量不属于上游实际用量。单图和双图观测均已加入回归资料，无图基线不计入图片观测条数。
 
 另有一条旧的 40 张 910 × 1287 图片记录，上游图片字段为 28,601，比公式多 1 token，原因尚未解释；本轮重新测试同尺寸 40 图得到 28,600，与预先预测一致。旧记录不计入上述全部匹配的结论，也不据此添加逐图修正。
 
