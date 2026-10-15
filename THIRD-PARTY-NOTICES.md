@@ -30,6 +30,19 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+## DeepSeek-V4.1-Flash 图片尺寸算法
+
+- `core/vision-budget.js` 中的 `deepseekImageTokens` 改写自官方 [`inference/image_processor.py`](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/5254448103b6254fc646dacbca1cbbf20e9216c1/inference/image_processor.py)，参数来自同版本 [`inference/config.json`](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/5254448103b6254fc646dacbca1cbbf20e9216c1/inference/config.json)。固定版本为 `5254448103b6254fc646dacbca1cbbf20e9216c1`。
+- 修改内容为将纯尺寸计算移植到 JavaScript，并在代理中限制支持的尺寸范围；不分发或加载模型权重，也不引入原处理器的运行依赖。
+- 上游 [LICENSE](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/5254448103b6254fc646dacbca1cbbf20e9216c1/LICENSE) 为 MIT，版权声明为 `Copyright (c) 2023 DeepSeek`，许可全文与本文前述 DeepSeek MIT 文本相同，并适用于该衍生算法。
+
+## Transformers / Qwen 图片尺寸算法
+
+- `core/vision-budget.js` 中的 `qwenImageTokens` 和 Python 半格取偶舍入的 JavaScript 实现，改写自 Transformers [`image_processing_qwen2_vl.py` 中的 `smart_resize`](https://github.com/huggingface/transformers/blob/8cb5963cc22174954e7dca2c0a3320b7dc2f4edc/src/transformers/models/qwen2_vl/image_processing_qwen2_vl.py#L54-L80)。固定提交为 `8cb5963cc22174954e7dca2c0a3320b7dc2f4edc`（`v4.57.1`）。参数来自 [Qwen/Qwen3.8-27B 的固定版本预处理配置](https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/preprocessor_config.json)。
+- 源文件版权声明为 `Copyright 2024 The Qwen team, Alibaba Group and the HuggingFace Inc. team. All rights reserved.`。Transformers 仓库 LICENSE 另保留 `Copyright 2018- The Hugging Face team. All rights reserved.`。
+- 修改内容为纯尺寸算法的 JavaScript 移植，保留上游取整方式与运算顺序，并增加代理自身的输入范围限制、图片起止标记计数与软余量。未引入 Transformers、PyTorch 或模型运行依赖。
+- 许可为 Apache License 2.0，固定提交的原始许可全文随仓库保存在 [`vendor/licenses/transformers-LICENSE`](vendor/licenses/transformers-LICENSE)。该衍生部分适用 Apache License 2.0，不受本项目默认 MIT 许可替代。
+
 ## sm-crypto(vendored)
 
 - 文件:`sm2.js`,来自 [sm-crypto](https://github.com/JuneAndGreen/sm-crypto) **v0.3.13** 的 `dist/sm2.js`

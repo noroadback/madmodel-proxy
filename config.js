@@ -129,6 +129,7 @@ module.exports = Object.freeze({
   sseLineLimit: 1024 * 1024,       // 尾部未完成行的字节上限(防病态流内存膨胀)
 
   // 请求编码与诊断
+  debugBudget: process.env.PROXY_DEBUG_BUDGET === '1', // 预算明细仅在排障时输出
   dumpFailed: process.env.DUMP_FAILED === '1',  // 失败请求体落盘(默认关,隐私)
 
   // 工具补救优先解析完整文本，必要时额外重发一次。

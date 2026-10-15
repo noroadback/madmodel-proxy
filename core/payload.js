@@ -3,6 +3,7 @@
 'use strict';
 
 const { applyThinking, readThinkingIntent } = require('./thinking');
+const { estimateVisionBudget } = require('./vision-budget');
 
 const UPSTREAM_REJECTED = ['logprobs', 'top_logprobs'];
 
@@ -77,47 +78,62 @@ function normalizePayload(payload, model, meta, maxOutputTokens) {
   return applied;
 }
 
-// 输入、模板余量与输出预算共享模型窗口。只收缩显式输出预算；
-// 未指定 max_tokens 时不注入默认值，输入与余量已超限才拒绝。
+// 文本、工具与模板余量用于预检；图片估值另列，只辅助收缩输出，
+// 不作为本地拒绝请求的依据。未指定 max_tokens 时不注入默认值。
 // 工具定义按上游模板渲染的实测额外开销约为每项 16~18 token，预留 20。
 const TOOL_DEF_TOKENS = 20;
 // 模板与本地计数仍可能有偏差，不把输出预算压到估算窗口的最后一个 token。
 const CONTEXT_RESERVE_TOKENS = 1024;
-// 图片按张预留，不下载或解码用户图片；这不是上游的精确视觉 token 计数。
-const IMAGE_RESERVE_TOKENS = 16384;
-
-function promptTokenReserve(payload, promptTokens = 0, marginRatio = 0) {
+function estimatePromptBudget(payload, promptTokens = 0, marginRatio = 0) {
   const toolCount = Array.isArray(payload?.tools) ? payload.tools.length : 0;
-  let imageCount = 0;
-  for (const message of Array.isArray(payload?.messages) ? payload.messages : []) {
-    if (Array.isArray(message?.content)) {
-      imageCount += message.content.filter(part => part?.type === 'image_url').length;
-    }
-  }
-  return CONTEXT_RESERVE_TOKENS + toolCount * TOOL_DEF_TOKENS +
-    Math.ceil(promptTokens * marginRatio) + imageCount * IMAGE_RESERVE_TOKENS;
+  const toolReserveTokens = toolCount * TOOL_DEF_TOKENS;
+  const marginTokens = Math.ceil(promptTokens * marginRatio);
+  return {
+    baseReserveTokens: CONTEXT_RESERVE_TOKENS,
+    toolReserveTokens,
+    marginTokens,
+    reserveTokens: CONTEXT_RESERVE_TOKENS + toolReserveTokens + marginTokens,
+    ...estimateVisionBudget(payload),
+  };
 }
 
-function fitTokenBudget(promptTokens, payload, contextWindow, reserve = promptTokenReserve(payload)) {
+function fitTokenBudget(promptTokens, payload, contextWindow,
+  estimate = estimatePromptBudget(payload, promptTokens)) {
+  const reserve = estimate.reserveTokens;
   const effectivePrompt = promptTokens + reserve;
-
-  const budget = typeof payload.max_tokens === 'number' ? payload.max_tokens : 0;
-  if (effectivePrompt + budget <= contextWindow) return { ok: true, note: '' };
+  const originalBudget = payload.max_tokens;
+  const budget = typeof originalBudget === 'number' ? originalBudget : 0;
   const room = contextWindow - effectivePrompt;
   // 思考关闭的判定与归一化同源(core/thinking.js 认三方言+原生)。生产路径
   // 恒先归一化(届时思考意图已被翻译掉),但本函数不静默依赖该前置——
   // 直接调用的原始形态方言同样得到正确下限
   const noThinking = readThinkingIntent(payload) === false;
   const floor = noThinking ? 1 : 512;
-  if (room < floor) {
-    return {
-      ok: false,
-      message: `上下文空间不足，本地估算输入 ${promptTokens}、预留余量 ${reserve}、最低输出 ${floor}，上下文上限 ${contextWindow} tokens。请缩短对话。`,
-    };
+  if (effectivePrompt + budget > contextWindow) {
+    if (room < floor) {
+      return {
+        ok: false,
+        message: '对话内容过长，请缩短对话或新建会话后重试。',
+      };
+    }
+    payload.max_tokens = room;
   }
-  payload.max_tokens = room;
-  return { ok: true, note: ` norm[max_tokens→${room} 预检收缩]` };
+
+  if (estimate.imageCount > 0 && typeof payload.max_tokens === 'number') {
+    const estimatedRoom = room - estimate.imageTokensEstimate - estimate.imageMarginTokens;
+    // 估值不足以保留最低输出时，交由上游按实际用量判断，避免图片高估
+    // 再次误拒合法请求，或把输出预算强行压到 0/最低值。
+    if (estimatedRoom >= floor && payload.max_tokens > estimatedRoom) {
+      payload.max_tokens = estimatedRoom;
+    }
+  }
+
+  return {
+    ok: true,
+    note: payload.max_tokens !== originalBudget
+      ? ` norm[max_tokens→${payload.max_tokens} 预检收缩]` : '',
+  };
 }
 
-module.exports = { parseJsonBody, normalizePayload, fitTokenBudget, promptTokenReserve,
-  TOOL_DEF_TOKENS, CONTEXT_RESERVE_TOKENS, IMAGE_RESERVE_TOKENS };
+module.exports = { parseJsonBody, normalizePayload, fitTokenBudget, estimatePromptBudget,
+  TOOL_DEF_TOKENS, CONTEXT_RESERVE_TOKENS };

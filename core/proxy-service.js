@@ -2,7 +2,7 @@
 
 'use strict';
 
-const { normalizePayload, parseJsonBody, fitTokenBudget, promptTokenReserve } = require('./payload');
+const { normalizePayload, parseJsonBody, fitTokenBudget, estimatePromptBudget } = require('./payload');
 const { translateUpstreamError, describeFailedStream } = require('./errors');
 const { createAggregator } = require('./completion-aggregator');
 const { getTokenizer } = require('./tokenizer');
@@ -194,15 +194,28 @@ function createProxyService(deps) {
     const { payload, clientWantsStream, contextWindow, promptTokenMarginRatio } = prepared;
 
     const promptTokens = getTokenizer().countPromptTokens(payload);
-    const reserveTokens = promptTokenReserve(payload, promptTokens, promptTokenMarginRatio);
-    const fit = fitTokenBudget(promptTokens, payload, contextWindow, reserveTokens);
+    const estimate = estimatePromptBudget(payload, promptTokens, promptTokenMarginRatio);
+    const fit = fitTokenBudget(promptTokens, payload, contextWindow, estimate);
+    if (config.debugBudget) {
+      // 仅排障时记录；本地拒绝、上游拒绝、断流和超时也保留预算依据。
+      // 100 仅为本地日志的阶段标记，不向客户端发送额外 HTTP 响应。
+      const outputBudgetForLog = payload.max_tokens === undefined ? '未指定'
+        : typeof payload.max_tokens === 'number' && Number.isFinite(payload.max_tokens)
+          ? payload.max_tokens : '无效';
+      const budgetDetails = `预算[文本=${promptTokens} 模板=${estimate.baseReserveTokens}` +
+        ` 工具=${estimate.toolReserveTokens} 文本误差=${estimate.marginTokens}` +
+        ` 图片=${estimate.imageCount} 图像估值=${estimate.imageTokensEstimate}` +
+        ` 图像余量=${estimate.imageMarginTokens} 来源=${estimate.imageEstimateSource}` +
+        ` 输出=${outputBudgetForLog} 窗口=${contextWindow}]`;
+      logReq(ctx.req, 100, ctx.started, ctx.size, budgetDetails, payload.model);
+    }
     if (!fit.ok) {
       logReq(ctx.req, 413, ctx.started, ctx.size, fit.message, payload.model);
       return ctx.sendError(413, fit.message);
     }
-    const budgetNote = fit.note ? ` 输出预算 ${payload.max_tokens}` : '';
+    const budgetNote = config.debugBudget && fit.note ? ` 输出预算 ${payload.max_tokens}` : '';
     const budgetHint = {
-      promptTokens, reserveTokens, contextWindow,
+      ...estimate, promptTokens, contextWindow,
       tokenBudget: typeof payload.max_tokens === 'number' ? payload.max_tokens : 0,
     };
 
@@ -364,7 +377,8 @@ function createProxyService(deps) {
         ctx.dumpFailed();
         const mapped = translateUpstreamError(result.body, result.raw, result.status, budgetHint);
         logReq(req, mapped.http, started, size, mapped.message, servedModel);
-        return ctx.sendError(mapped.http, mapped.message, 'upstream_error', errorHeaders(result, mapped.http, extraHeaders));
+        return ctx.sendError(mapped.http, mapped.message, mapped.type || 'upstream_error',
+          errorHeaders(result, mapped.http, extraHeaders), mapped.code);
       }
       ctx.endResponse();
       logReq(req, 200, started, size, `回复中断 ${String(
@@ -489,7 +503,8 @@ function createProxyService(deps) {
       ctx.dumpFailed();
       const mapped = translateUpstreamError(result.body, result.raw, result.status, budgetHint);
       logReq(req, mapped.http, started, size, mapped.message, payload.model);
-      return ctx.sendError(mapped.http, mapped.message, 'upstream_error', errorHeaders(result, mapped.http, extraHeaders));
+      return ctx.sendError(mapped.http, mapped.message, mapped.type || 'upstream_error',
+        errorHeaders(result, mapped.http, extraHeaders), mapped.code);
     }
     const mapped = mapResult(result, 'agg');
     if (mapped) {

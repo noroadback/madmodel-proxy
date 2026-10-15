@@ -202,6 +202,60 @@ test('上游错误判定集成矩阵(mock 上游 + 完整代理实例)', async t
       assert.ok(r.json.error.message.includes('busy'));
     });
 
+    await t.test('真实 HTTP 400 上下文错误回放: 两种客户端模式均返回标准超限错误', async () => {
+      // 2026-10-15 直连上游实测的两种校验路径，原文只含合成样本的数量。
+      const messages = [
+        "This model's maximum context length is 1048576 tokens. However, you requested 1048576 output tokens and your prompt contains 89 characters (more than 0 characters, which is the upper bound for 0 input tokens). Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_text, value=89)",
+        "This model's maximum context length is 1048576 tokens. However, you requested 1047552 output tokens and your prompt contains at least 1025 input tokens, for a total of at least 1048577 tokens. Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_tokens, value=1025)",
+        "This model's maximum context length is 262144 tokens. However, you requested 262144 output tokens and your prompt contains 108 characters (more than 0 characters, which is the upper bound for 0 input tokens). Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_text, value=108)",
+      ];
+      for (const message of messages) {
+        for (const stream of [true, false]) {
+          let hits = 0;
+          mock.set((req, res) => {
+            hits++;
+            res.writeHead(400, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ error: { message, type: 'BadRequestError',
+              param: message.includes('parameter=input_tokens') ? 'input_tokens' : 'input_text', code: 400 } }));
+          });
+          const r = await chat(stream);
+          assert.strictEqual(r.status, 400);
+          assert.strictEqual(r.json.error.type, 'invalid_request_error');
+          assert.strictEqual(r.json.error.code, 'context_length_exceeded');
+          assert.ok(r.json.error.message.includes(message));
+          assert.strictEqual(hits, 1, '明确参数错误不应触发重试');
+        }
+      }
+    });
+
+    await t.test('HTTP 400 max_tokens 参数错误: 保留 400 与原文，不误报上下文超限', async () => {
+      for (const stream of [true, false]) {
+        const message = 'max_tokens must be greater than 0';
+        mock.set((req, res) => {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: { message, type: 'BadRequestError', param: 'max_tokens', code: 400 } }));
+        });
+        const r = await chat(stream);
+        assert.strictEqual(r.status, 400);
+        assert.strictEqual(r.json.error.type, 'invalid_request_error');
+        assert.strictEqual(r.json.error.code, 400);
+        assert.ok(r.json.error.message.includes(message));
+      }
+    });
+
+    await t.test('200 SSE 内嵌标准上下文错误: 两种客户端模式均传递 type 和 code', async () => {
+      for (const stream of [true, false]) {
+        mock.set((req, res) => sse(res, [JSON.stringify({ error: {
+          message: 'context overflow', type: 'invalid_request_error', code: 'context_length_exceeded',
+        } })]));
+        const r = await chat(stream);
+        assert.strictEqual(r.status, 400);
+        assert.strictEqual(r.json.error.type, 'invalid_request_error');
+        assert.strictEqual(r.json.error.code, 'context_length_exceeded');
+        assert.ok(r.json.error.message.includes('context overflow'));
+      }
+    });
+
     await t.test('200 SSE 内嵌标准 error 对象帧: 翻译为 5xx 错误,不进聚合', async () => {
       mock.set((req, res) => sse(res, [JSON.stringify({ error: { message: 'quota exceeded' } })]));
       const r = await chat(false);

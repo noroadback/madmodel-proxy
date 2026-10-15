@@ -28,9 +28,9 @@ function sendJson(res, status, value, extraHeaders) {
   res.end(body);
 }
 
-function openAiError(res, status, message, type, extraHeaders) {
+function openAiError(res, status, message, type, extraHeaders, code) {
   sendJson(res, status, {
-    error: { message, type: type || 'proxy_error', code: status },
+    error: { message, type: type || 'proxy_error', code: code ?? status },
   }, extraHeaders);
 }
 
@@ -455,7 +455,7 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
       },
       // 终态响应面
       sendJson(status, body, headers) { sendJson(res, status, body, headers); },
-      sendError(status, message, type, headers) { openAiError(res, status, message, type, headers); },
+      sendError(status, message, type, headers, code) { openAiError(res, status, message, type, headers, code); },
       // 失败请求体落盘(默认关,隐私考虑:body 含完整对话内容)
       dumpFailed() {
         if (!config.dumpFailed) return;

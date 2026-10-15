@@ -23,21 +23,39 @@ function translateUpstreamError(bodyObj, raw, status, busyHint) {
   if (bodyObj?.status === 10003) {
     return { http: 401, message: 'token 无效或已过期，请确认 watch 守护在运行（npm start）。' };
   }
+  // 当前上游会用 HTTP 400 + BadRequestError 明确报告上下文超限。
+  // 保留标准错误码，便于客户端压缩会话；不能把所有 max_tokens 参数错误都归为超限。
+  const contextExceeded = bodyObj?.error?.code === 'context_length_exceeded' ||
+    bodyObj?.code === 'context_length_exceeded' ||
+    (status === 400 && typeof detail === 'string' &&
+      /^This model's maximum context length is \d+ tokens\./i.test(detail));
+  if (contextExceeded || status === 400) {
+    const message = typeof detail === 'string' && detail
+      ? detail
+      : (typeof raw === 'string' && !/<html/i.test(raw) ? raw : '');
+    return {
+      http: 400,
+      type: 'invalid_request_error',
+      ...(contextExceeded ? { code: 'context_length_exceeded' } : {}),
+      message: message ? `上游拒绝请求: ${message.slice(0, 1024)}` :
+        (contextExceeded ? '上下文超限，请缩短对话或调低输出上限后重试。' :
+          '上游拒绝请求（HTTP 400），请检查请求参数。'),
+    };
+  }
   const likelyOverflow = hint => hint &&
     (hint.promptTokens + hint.tokenBudget > hint.contextWindow ||
       hint.promptTokens >= hint.contextWindow);
   if (typeof detail === 'string' && /同时进行中的请求过多|并发(?:请求)?(?:数)?(?:已满|过多|超[出过])/.test(detail)) {
     return { http: 429, message: '上游并发已满，请稍后重试。' };
   }
-  const overflowMessage = hint =>
-    `疑似上下文超限，本地估算输入 ${hint.promptTokens} + 输出预算 ${hint.tokenBudget}，上限 ${hint.contextWindow} tokens。请缩短对话或降低输出预算。`;
+  const overflowMessage = '疑似上下文超限，请缩短对话或调低输出上限后重试。';
   const nearLimit = busyHint && busyHint.tokenBudget > 0 && busyHint.reserveTokens > 0 &&
     busyHint.promptTokens + busyHint.tokenBudget + busyHint.reserveTokens >= busyHint.contextWindow;
-  const budgetAdvice = '输入与输出预算接近上下文上限，请先降低 max_tokens 或缩短对话。';
+  const budgetAdvice = '请缩短对话或调低输出上限后重试。';
 
   if (bodyObj?.status === 10001) {
     if (likelyOverflow(busyHint)) {
-      return { http: 413, message: overflowMessage(busyHint) };
+      return { http: 413, message: overflowMessage };
     }
     return {
       http: 429,
@@ -47,7 +65,7 @@ function translateUpstreamError(bodyObj, raw, status, busyHint) {
   }
   if (typeof bodyObj?.errorMessage === 'string' && /繁忙/.test(bodyObj.errorMessage)) {
     if (likelyOverflow(busyHint)) {
-      return { http: 413, message: overflowMessage(busyHint) };
+      return { http: 413, message: overflowMessage };
     }
     return { http: 429, message: `上游提示“${bodyObj.errorMessage.slice(0, 120)}”。` +
       (nearLimit ? budgetAdvice : '也可能是参数不兼容，请用短对话和默认参数重试。') };
