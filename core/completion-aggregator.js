@@ -11,6 +11,7 @@ function createAggregator(model = '', thinkingField = null) {
     id: '', model,
     content: '', reasoning: '',
     toolCalls: Object.create(null), // index → {id, type, function:{name, arguments}}
+    invalidToolCalls: false,
     finish: null, usage: null, created: 0,
     feed(obj) {
       if (obj.id) this.id = obj.id;
@@ -29,11 +30,26 @@ function createAggregator(model = '', thinkingField = null) {
       if (r !== null) this.reasoning += r;
       if (Array.isArray(d.tool_calls)) {
         for (const tc of d.tool_calls) {
+          if (!tc || typeof tc !== 'object' || Array.isArray(tc)) {
+            this.invalidToolCalls = true;
+            continue;
+          }
           const i = tc.index != null ? tc.index : 0;
           if (!Number.isSafeInteger(i) || i < 0) {
             const error = new Error('上游工具调用索引无效');
             error.code = 'UPSTREAM_TOOL_INDEX';
             throw error;
+          }
+          // 续帧可省略字段或传 null；显式错误类型则必须记住，不能被默认值、
+          // 字符串拼接或后续正常帧洗掉。调用方在交付前同时检查这个标志。
+          const fn = tc.function;
+          if ((tc.type != null && tc.type !== 'function') ||
+              (tc.id != null && typeof tc.id !== 'string') ||
+              (fn != null && (typeof fn !== 'object' || Array.isArray(fn))) ||
+              (fn?.name != null && typeof fn.name !== 'string') ||
+              (fn?.arguments != null && typeof fn.arguments !== 'string')) {
+            this.invalidToolCalls = true;
+            continue;
           }
           if (!this.toolCalls[i]) this.toolCalls[i] = { id: '', type: 'function', function: { name: '', arguments: '' } };
           if (tc.id) this.toolCalls[i].id = tc.id;
@@ -47,8 +63,10 @@ function createAggregator(model = '', thinkingField = null) {
     result() {
       const message = { role: 'assistant', content: this.content || null };
       if (this.reasoning) message.reasoning_content = this.reasoning;
+      // 保留出现过的每个索引。过滤缺 id/name 的项会让交付校验漏掉它们，
+      // 而流式路径随后仍会冲刷含这些半截调用的原始帧。
       const toolList = Object.keys(this.toolCalls).sort((a, b) => Number(a) - Number(b))
-        .map(k => this.toolCalls[k]).filter(tc => tc.id || tc.function.name);
+        .map(k => this.toolCalls[k]);
       if (toolList.length) message.tool_calls = toolList;
       return {
         id: this.id || `chatcmpl-proxy-${Date.now()}`,

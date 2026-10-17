@@ -38,6 +38,14 @@ function createToolRecovery({ config, upstreamClient }) {
   async function retry(payload, auth, signal, tools, thinkingField) {
     const retryPayload = { ...payload, stream: false };
     delete retryPayload.stream_options;
+    // 常规 SSE 请求的输出预算可能超过上游非流式接口的独立上限。
+    // 只收缩已指定的预算，保留此前按上下文计算的更小值。
+    const limit = typeof config.limitsFor === 'function'
+      ? config.limitsFor(payload.model)?.maxNonstreamOutputTokens : undefined;
+    if (Number.isFinite(limit) && limit > 0 &&
+        typeof retryPayload.max_tokens === 'number' && retryPayload.max_tokens > limit) {
+      retryPayload.max_tokens = limit;
+    }
     const ac = new AbortController();
     const onAbort = () => ac.abort();
     if (signal?.aborted) return null;
@@ -59,6 +67,9 @@ function createToolRecovery({ config, upstreamClient }) {
       signal?.removeEventListener('abort', onAbort);
     }
     if (signal?.aborted) return null;
+    if (result?.type === 'stream' && agg.invalidToolCalls) {
+      return { calls: null, content: '', usage: result.usage || agg.usage };
+    }
     const body = result?.type === 'completion' ? result.body : result?.type === 'stream' ? agg.result() : null;
     if (!body) return null;
     const ch = body.choices?.[0];

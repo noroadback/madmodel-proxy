@@ -83,7 +83,7 @@ test('Qwen 每次实际发往上游的请求使用独立缓存', async t => {
         assert(response.includes('[DONE]'));
       }
       uniqueSalts(seen);
-      assert.equal(seen[0].tool_choice, 'none');
+      assert.equal(seen[0].tool_choice, 'auto');
       assert.deepEqual(seen[0].tools, TOOLS);
       assert.deepEqual(withoutSalt(seen[0]), withoutSalt(seen[1]));
       assert(seen.every(body => !Object.keys(body).some(key => key.startsWith('__'))));

@@ -23,13 +23,17 @@ function translateUpstreamError(bodyObj, raw, status, busyHint) {
   if (bodyObj?.status === 10003) {
     return { http: 401, message: 'token 无效或已过期，请确认 watch 守护在运行（npm start）。' };
   }
-  // 当前上游会用 HTTP 400 + BadRequestError 明确报告上下文超限。
+  // 上游也会在 HTTP 200 中包裹 code:400；不能因此丢失参数错误语义。
+  // 仅在成功 HTTP 状态下采用内嵌 400，避免覆盖真实网关或服务端故障。
+  const bodyCode = bodyObj?.error?.code ?? bodyObj?.code;
+  const badRequest = status === 400 ||
+    (status === 200 && (bodyCode === 400 || bodyCode === '400'));
   // 保留标准错误码，便于客户端压缩会话；不能把所有 max_tokens 参数错误都归为超限。
   const contextExceeded = bodyObj?.error?.code === 'context_length_exceeded' ||
     bodyObj?.code === 'context_length_exceeded' ||
-    (status === 400 && typeof detail === 'string' &&
-      /^This model's maximum context length is \d+ tokens\./i.test(detail));
-  if (contextExceeded || status === 400) {
+    (badRequest && typeof detail === 'string' &&
+      /^(?:This model's maximum context length is \d+ tokens\.|Requested token count exceeds the model's maximum context length of \d+ tokens\.)/i.test(detail));
+  if (contextExceeded || badRequest) {
     const message = typeof detail === 'string' && detail
       ? detail
       : (typeof raw === 'string' && !/<html/i.test(raw) ? raw : '');

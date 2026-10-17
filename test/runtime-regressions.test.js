@@ -72,6 +72,38 @@ async function run(body, responses, overrides = {}) {
   return { ctx, seen };
 }
 
+for (const stream of [true, false]) {
+  test(`非流式工具补救遵守逐模型输出上限，客户端流式=${stream}`, async () => {
+    for (const model of ['qwen3.8-27b', 'DeepSeek-V4.1-Flash', 'DeepSeek-R1-W8A8']) {
+      for (const budget of [undefined, 4096, 131072, 160000]) {
+        const { ctx, seen } = await run({ model, stream, tools,
+          tool_choice: 'auto', ...(budget === undefined ? {} : { max_tokens: budget }) }, [
+          { type: 'stream', body: completion('') },
+          { type: 'completion', body: completion('', [native('Read')]) },
+        ]);
+        assert.equal(seen.length, 2);
+        assert.equal(seen[0].stream, true);
+        assert.equal(seen[0].max_tokens, budget, '常规 SSE 请求仍使用原预算');
+        assert.equal(seen[1].stream, false);
+        assert.equal(seen[1].stream_options, undefined);
+        assert.equal(seen[1].max_tokens,
+          model === 'qwen3.8-27b' && budget > 131072 ? 131072 : budget);
+        assert.equal(seen[1].tool_choice, 'auto');
+        assert.deepEqual(delivered(ctx).choices[0].message.tool_calls, [native('Read')]);
+      }
+    }
+  });
+  test(`工具补救收到 SSE 时拒绝被聚合转换的非法字段，客户端流式=${stream}`, async () => {
+    const invalid = { ...native('Read'), function: { name: 'Read', arguments: ['{}'] } };
+    const { ctx, seen } = await run({ stream, tools }, [
+      { type: 'stream', body: completion('') },
+      { type: 'stream', body: completion('', [invalid]) },
+    ]);
+    assert.equal(seen.length, 2);
+    assert.equal(delivered(ctx).choices[0].message.tool_calls, undefined);
+  });
+}
+
 test('含图请求成功或失败时默认隐藏预算，调试模式保留分项', async t => {
   const lines = [];
   t.mock.method(console, 'log', (...args) => lines.push(args.join(' ')));
@@ -270,7 +302,8 @@ for (const stream of [false, true]) {
       const { ctx, seen } = await run({ stream, tools, tool_choice: { type: 'function', function: { name: 'Write' } } },
         [{ type: transport, body: completion(markup('Read')) }]);
       assert.equal(delivered(ctx).choices[0].message.tool_calls, undefined);
-      assert.equal(seen[0].tool_choice, 'none', 'Qwen 上游兼容降级仍生效');
+      assert.deepEqual(seen[0].tool_choice, { type: 'function', function: { name: 'Write' } },
+        'Qwen 原生工具选择应原样发送');
     });
     for (const mode of ['none', 'disabled']) {
       test(`工具恢复关闭不解析也不重试，${mode}，客户端=${stream}，上游=${transport}`, async () => {
@@ -400,6 +433,28 @@ test('凭据等待释放槽位，恢复时仍遵守本地并发上限', async ()
 });
 
 for (const stream of [true, false]) {
+  test(`HTTP 200 JSON 内嵌 R1 上下文错误交付 400 与标准 code，流式=${stream}`, async t => {
+    // 2026-10-17 R1 边界探测的响应；本地预算已调整时，上游仍可能按实际输入拒绝。
+    const message = "Requested token count exceeds the model's maximum context length of 163840 tokens. You requested a total of 163849 tokens: 9 tokens from the input messages and 163840 tokens for the completion. Please reduce the number of tokens in the input messages or the completion to fit within the limit.";
+    const body = { error: { object: 'error', message, type: 'BadRequestError', param: null, code: 400 } };
+    let requests = 0;
+    t.mock.method(globalThis, 'fetch', async (_url, options) => {
+      requests++;
+      assert.equal(JSON.parse(options.body).stream, true);
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    const service = createProxyService({ config, tokenState: () => auth,
+      upstreamClient: createUpstreamClient(config) });
+    const ctx = context({ model: 'DeepSeek-R1-W8A8', stream, max_tokens: 163840 });
+    await service.handleRequest(ctx);
+    assert.equal(requests, 1, '明确参数错误不应重试');
+    assert.equal(ctx.out.status, 400);
+    assert.equal(ctx.out.type, 'invalid_request_error');
+    assert.equal(ctx.out.code, 'context_length_exceeded');
+    assert.ok(ctx.out.message.includes(message));
+    assert.deepEqual(ctx.out.chunks, []);
+    assert.deepEqual(ctx.out.lines, [], '不得伪装成成功 SSE 或发送 DONE');
+  });
   test(`上游并发错误映射 429 且保留 Retry-After，流式=${stream}`, async () => {
     const { ctx } = await run({ stream }, [{ type: 'upstream-error', status: 200,
       body: { errorMessage: '您的同时进行中的请求过多，请等待已有请求完成后再试' }, retryAfter: '7' }]);

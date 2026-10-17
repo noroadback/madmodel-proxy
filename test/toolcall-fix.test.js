@@ -383,6 +383,154 @@ test('工具调用补救(1.10.1)', async t => {
       assert.ok(!r.text.includes('tool_calls'), '无效参数不得交付: ' + r.text);
     });
 
+    // 校验与交付必须使用同一份完整调用集合，不能在聚合时过滤或转换坏字段。
+    const completeCall = { index: 0, id: 'call_ok', type: 'function',
+      function: { name: 'Bash', arguments: '{"command":"Get-Location"}' } };
+    const invalidCalls = [
+      ['缺 id/name 的半截调用', { index: 1, function: { arguments: '{"command":' } }],
+      ['缺 id', { index: 1, type: 'function', function: { name: 'Bash', arguments: '{}' } }],
+      ['缺 name', { index: 1, id: 'call_bad', type: 'function', function: { arguments: '{}' } }],
+      ['非法 type', { ...completeCall, index: 1, id: 'call_bad', type: 'invalid-type' }],
+      ['数字 name', { ...completeCall, index: 1, id: 'call_bad', function: { name: 123, arguments: '{}' } }],
+      ['数组 arguments', { ...completeCall, index: 1, id: 'call_bad', function: { name: 'Bash', arguments: ['{}'] } }],
+    ];
+    for (const stream of [true, false]) {
+      for (const upstreamFormat of ['sse', 'json']) {
+        for (const [label, badCall] of invalidCalls) {
+          await t.test(`交付校验拒绝${label}: stream=${stream}, upstream=${upstreamFormat}`, async () => {
+            seen = [];
+            mock.set((req, res) => {
+              req.resume();
+              req.on('end', () => {
+                seen.push(1);
+                const calls = [completeCall, badCall];
+                if (upstreamFormat === 'sse') {
+                  sse(res, [JSON.stringify({ choices: [{ index: 0,
+                    delta: { tool_calls: calls }, finish_reason: null }] }),
+                  JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })]);
+                } else {
+                  res.writeHead(200, { 'content-type': 'application/json' });
+                  res.end(JSON.stringify({ choices: [{ index: 0, message: {
+                    role: 'assistant', content: null, tool_calls: calls,
+                  }, finish_reason: 'tool_calls' }] }));
+                }
+              });
+            });
+            const r = await chat(stream, { tools: TOOLS });
+            assert.strictEqual(seen.length, 1, '无效原生调用不得触发补救重试');
+            assert.strictEqual(r.status, 502, r.text);
+            assert.ok(r.json?.error?.message.includes('不是有效 JSON'), r.text);
+            assert.ok(!r.text.includes('tool_calls'), '不得交付部分调用: ' + r.text);
+            assert.ok(!r.text.includes('[DONE]'), '失败响应不得伪装成完整流');
+          });
+        }
+      }
+    }
+
+    await t.test('思考已交付后发现坏工具调用，关闭流且不冲刷调用或 DONE', async () => {
+      seen = [];
+      mock.set((req, res) => {
+        req.resume();
+        req.on('end', () => {
+          seen.push(1);
+          sse(res, [JSON.stringify({ choices: [{ index: 0,
+            delta: { reasoning_content: '先检查路径。' }, finish_reason: null }] }),
+          JSON.stringify({ choices: [{ index: 0,
+            delta: { tool_calls: [completeCall, invalidCalls[0][1]] }, finish_reason: 'tool_calls' }] })]);
+        });
+      });
+      const r = await chat(true, { tools: TOOLS });
+      assert.strictEqual(seen.length, 1);
+      assert.strictEqual(r.status, 200, '思考已发出，HTTP 状态无法再改');
+      assert.ok(r.text.includes('先检查路径。'));
+      assert.ok(!r.text.includes('tool_calls'), '完整及半截调用均不得交付');
+      assert.ok(!r.text.includes('[DONE]'), '客户端必须能识别响应未正常结束');
+    });
+
+    for (const stream of [true, false]) {
+      await t.test(`正常多工具跨帧参数仍完整交付: stream=${stream}`, async () => {
+        const frames = [
+          { choices: [{ index: 0, delta: { tool_calls: [
+            { index: 0, id: 'call_a', type: 'function', function: { name: 'Bash', arguments: '{"command":"' } },
+            { index: 1, id: 'call_b', type: 'function', function: { name: 'Bash', arguments: '{"command":"' } },
+          ] }, finish_reason: null }] },
+          { choices: [{ index: 0, delta: { tool_calls: [
+            { index: 1, function: { arguments: 'Get-Location"}' } },
+            { index: 0, function: { arguments: 'Get-Date"}' } },
+          ] }, finish_reason: null }] },
+          { choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] },
+        ];
+        seen = [];
+        mock.set((req, res) => {
+          req.resume();
+          req.on('end', () => { seen.push(1); sse(res, frames.map(f => JSON.stringify(f))); });
+        });
+        const r = await chat(stream, { tools: TOOLS });
+        assert.strictEqual(seen.length, 1);
+        assert.strictEqual(r.status, 200, r.text);
+        if (stream) {
+          const chunks = r.text.split('\n').filter(line => line.startsWith('data: {'))
+            .map(line => JSON.parse(line.slice(6)));
+          assert.deepStrictEqual(chunks, frames, '校验通过后保留原始 SSE 帧');
+          assert.ok(r.text.trimEnd().endsWith('data: [DONE]'));
+        } else {
+          const calls = r.json.choices[0].message.tool_calls;
+          assert.deepStrictEqual(calls.map(call => call.id), ['call_a', 'call_b']);
+          assert.deepStrictEqual(calls.map(call => JSON.parse(call.function.arguments).command),
+            ['Get-Date', 'Get-Location']);
+        }
+      });
+    }
+
+    // 真实 Qwen 指定工具的响应：参数合法，但结束原因错标为 stop。
+    for (const stream of [true, false]) {
+      for (const upstreamFormat of ['sse', 'json']) {
+        for (const finish of ['stop', 'length']) {
+          await t.test(`指定工具仅规范化 stop: stream=${stream}, upstream=${upstreamFormat}, finish=${finish}`, async () => {
+            const call = { id: 'call_weather', type: 'function',
+              function: { name: 'get_weather', arguments: '{"city":"Beijing"}' } };
+            seen = [];
+            mock.set((req, res) => {
+              req.resume();
+              req.on('end', () => {
+                seen.push(1);
+                if (upstreamFormat === 'sse') {
+                  sse(res, [JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: [
+                    { ...call, index: 0, function: { name: 'get_weather', arguments: '{"city":' } },
+                  ] }, finish_reason: null }] }),
+                  JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: [
+                    { index: 0, function: { arguments: '"Beijing"}' } },
+                  ] }, finish_reason: finish }] })]);
+                } else {
+                  res.writeHead(200, { 'content-type': 'application/json' });
+                  res.end(JSON.stringify({ choices: [{ index: 0, message: {
+                    role: 'assistant', content: null, tool_calls: [call],
+                  }, finish_reason: finish }] }));
+                }
+              });
+            });
+            const r = await chat(stream, { model: 'qwen3.8-27b',
+              tools: [{ type: 'function', function: { name: 'get_weather', parameters: {
+                type: 'object', properties: { city: { type: 'string' } }, required: ['city'],
+              } } }], tool_choice: { type: 'function', function: { name: 'get_weather' } } });
+            assert.strictEqual(seen.length, 1, '合法原生调用不得触发重试');
+            assert.strictEqual(r.status, 200, r.text);
+            let body = r.json;
+            if (stream) {
+              const agg = require('../core/completion-aggregator').createAggregator();
+              for (const line of r.text.split('\n')) {
+                if (line.startsWith('data: {')) agg.feed(JSON.parse(line.slice(6)));
+              }
+              body = agg.result();
+              assert.ok(r.text.trimEnd().endsWith('data: [DONE]'));
+            }
+            assert.strictEqual(body.choices[0].finish_reason, finish === 'stop' ? 'tool_calls' : 'length');
+            assert.deepStrictEqual(body.choices[0].message.tool_calls, [call]);
+          });
+        }
+      }
+    }
+
     // ---- 流式缓冲的冲刷路径(审阅者的变异实验指出这两条最敏感且当时无用例) ----
 
     await t.test('流式:命中补救失败时,缓冲帧仍完整交付(不得静默丢帧)', async () => {

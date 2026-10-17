@@ -47,6 +47,14 @@ function hasInvalidToolCalls(body) {
   return Array.isArray(calls) && calls.length > 0 && !validToolCalls(calls);
 }
 
+// Qwen 指定工具时可能把合法原生调用标成 stop。只修正已完成的调用，
+// length 等截断或错误结束原因必须原样保留。
+function normalizeToolCallFinish(choice, calls = choice?.message?.tool_calls) {
+  if (choice?.finish_reason === 'stop' && validToolCalls(calls)) {
+    choice.finish_reason = 'tool_calls';
+  }
+}
+
 // 均速反映整次请求的等待、生成和交付，不冒充服务端纯解码速度。
 function performanceNote(ctx, usage, recovery = {}, now = Date.now()) {
   const parts = [];
@@ -160,7 +168,7 @@ function createProxyService(deps) {
     };
   }
 
-  // Qwen 当前拒绝原生工具参数；保留定义供文本恢复，明确的客户端 none 不改。
+  // 仅为配置中明确拒收工具参数的模型降级；明确的客户端 none 不改。
   function downgradeToolsFor(payload, model) {
     const hasTools = Array.isArray(payload.tools) && payload.tools.length > 0;
     const rejects = typeof config.rejectsTools === 'function' && config.rejectsTools(model);
@@ -446,7 +454,7 @@ function createProxyService(deps) {
     }
     if (result.type === 'stream' && sawStructured) {
       const calls = structuredAgg.result().choices?.[0]?.message?.tool_calls;
-      if (!validToolCalls(calls)) {
+      if (structuredAgg.invalidToolCalls || !validToolCalls(calls)) {
         const message = '上游返回的工具调用参数不是有效 JSON，请重试。';
         if (ctx.sseHeadersSent()) {
           ctx.endResponse();
@@ -457,6 +465,7 @@ function createProxyService(deps) {
         }
         return;
       }
+      for (const frame of buffered) normalizeToolCallFinish(frame.choices?.[0], calls);
     }
     let recovery = {};
     let originalUsage = result.usage;
@@ -481,6 +490,7 @@ function createProxyService(deps) {
         logReq(req, 502, started, size, message, servedModel);
         return ctx.sendError(502, message);
       }
+      normalizeToolCallFinish(result.body.choices?.[0]);
       recovery = await recoverTools(result.body, payload, auth, ac.signal, streamThinkingField);
       if (ctx.clientGone()) return;
       const m = result.body.choices?.[0]?.message || {};
@@ -583,11 +593,12 @@ function createProxyService(deps) {
     }
     const out = result.type === 'completion' ? result.body : agg.result();
     normalizeCompletionReasoning(out, aggThinkingField);
-    if (hasInvalidToolCalls(out)) {
+    if ((result.type === 'stream' && agg.invalidToolCalls) || hasInvalidToolCalls(out)) {
       const message = '上游返回的工具调用参数不是有效 JSON，请重试。';
       logReq(req, 502, started, size, message, payload.model);
       return ctx.sendError(502, message);
     }
+    normalizeToolCallFinish(out.choices?.[0]);
     const originalUsage = result.type === 'completion' ? out.usage : agg.usage;
     const recovery = await recoverTools(out, payload, auth, ac.signal, aggThinkingField);
     if (ctx.clientGone()) return;

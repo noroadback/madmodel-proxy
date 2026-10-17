@@ -1,16 +1,6 @@
-// test/qwen-tools.test.js — qwen3.8-27b 的工具调用适配(1.10.1)。
-//
-// 背景(2026-09-28 实测):qwen 在带 `tools` 且 `tool_choice` 非 `none` 时被上游
-// 直接拒绝(约 55–160ms 回 `{"errorMessage":"服务器繁忙，请稍后再试"}`——上游的
-// 万能文案,此处实为"参数不被接受")。而 `tools` + `tool_choice:'none'` 能正常
-// 返回,模型把调用意图写成 Hermes 文本(<tool_call><function=X>…)。
-//
-// 故代理对这类模型把 tool_choice 降级为 none,再解析文本合成标准 tool_calls。
-// 本文件钉住四条:
-//   ① 带 tools → 上游收到 none(不再被拒),客户端拿到结构化调用
-//   ② 代理的降级**不等于**客户端要 none:后者仍绝不合成(防伪造)
-//   ③ 内部标记不外泄到上游
-//   ④ 其它模型不被降级(V4.1 原生路径不受影响)
+// qwen3.8-27b 原生工具调用：保留客户端选择，流式和聚合响应均交付原生调用。
+// 2026-10-17 上游已支持原生 auto；required/指定工具在此只验证代理原样转发，
+// 不据 mock 声称上游也已实测支持。完整 Hermes 文本仍可恢复，none 禁止补救。
 'use strict';
 require('../scripts/isolated-env').isolate();
 
@@ -61,17 +51,23 @@ function sse(res, frames) {
   res.end();
 }
 
-// 逐字抄自实测:qwen 在 tool_choice:none 下吐出的 Hermes 调用文本
+// 历史实测的 Hermes 调用文本，继续作为原生调用缺失时的恢复样本。
 const HERMES_TEXT = '\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\n北京\n</parameter>\n</function>\n</tool_call>';
 const HERMES_FRAMES = [
   JSON.stringify({ choices: [{ index: 0, delta: { role: 'assistant', content: HERMES_TEXT }, finish_reason: null }] }),
   JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
 ];
+const NATIVE_CALL = { id: 'call_native_qwen', type: 'function',
+  function: { name: 'get_weather', arguments: '{"city":"北京"}' } };
+const NATIVE_FRAMES = [
+  JSON.stringify({ choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, ...NATIVE_CALL }] }, finish_reason: null }] }),
+  JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] }),
+];
 
 const TOOLS = [{ type: 'function', function: { name: 'get_weather', description: '查询城市天气',
   parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] } } }];
 
-test('qwen 工具调用适配:降级 tool_choice 并合成标准调用', async t => {
+test('qwen 原生工具调用与文本恢复', async t => {
   const mock = await startMockUpstream();
   const port = await freePort();
   process.env.PROXY_UPSTREAM = `http://127.0.0.1:${mock.port}/v1/chat/completions`;
@@ -98,12 +94,13 @@ test('qwen 工具调用适配:降级 tool_choice 并合成标准调用', async t
   const url = `http://127.0.0.1:${port}/v1/chat/completions`;
 
   let got = [];
+  let frames = HERMES_FRAMES;
   mock.set((req, res) => {
     let b = ''; req.on('data', c => b += c);
     req.on('end', () => {
       let o = null; try { o = JSON.parse(b); } catch (e) {}
       got.push(o);
-      sse(res, HERMES_FRAMES);
+      sse(res, frames);
     });
   });
 
@@ -130,29 +127,64 @@ test('qwen 工具调用适配:降级 tool_choice 并合成标准调用', async t
   };
 
   try {
-    await t.test('带 tools → 上游收到 none(绕过拒收),客户端拿到结构化调用', async () => {
-      got = [];
-      const r = await chat({ model: 'qwen3.8-27b', messages: [{ role: 'user', content: '北京天气' }], tools: TOOLS, stream: true });
-      assert.strictEqual(r.status, 200);
-      assert.strictEqual(got.length, 1, '应只打一次上游(文本里能直接解析)');
-      assert.strictEqual(got[0].tool_choice, 'none', '必须降级,否则 qwen 会拒收');
-      assert.ok(Array.isArray(got[0].tools) && got[0].tools.length, 'tools 定义仍要发给模型(实测这样模型才输出调用)');
-      const p = streamParts(r.text);
-      assert.ok(p.tc, '客户端应拿到结构化 tool_calls');
-      assert.strictEqual(p.tc[0].function.name, 'get_weather');
-      assert.deepStrictEqual(JSON.parse(p.tc[0].function.arguments), { city: '北京' });
-      assert.strictEqual(p.finish, 'tool_calls');
-      assert.ok(!/<tool_call>/.test(p.content), '正文里不得残留标记:' + JSON.stringify(p.content.slice(0, 80)));
-    });
+    for (const stream of [true, false]) {
+      for (const choice of [undefined, 'auto', 'required', { type: 'function', function: { name: 'get_weather' } }]) {
+        await t.test(`原生调用保持选择与调用 ID：stream=${stream}, choice=${JSON.stringify(choice)}`, async () => {
+          got = [];
+          // 2026-10-17 指定工具的实测响应有完整调用，但上游结束标记为 stop。
+          frames = typeof choice === 'object' ? NATIVE_FRAMES.map(frame => {
+            const obj = JSON.parse(frame);
+            if (obj.choices[0].finish_reason === 'tool_calls') obj.choices[0].finish_reason = 'stop';
+            return JSON.stringify(obj);
+          }) : NATIVE_FRAMES;
+          const r = await chat({ model: 'qwen3.8-27b', messages: [{ role: 'user', content: '北京天气' }],
+            tools: TOOLS, stream, ...(choice === undefined ? {} : { tool_choice: choice }) });
+          assert.strictEqual(r.status, 200);
+          assert.strictEqual(got.length, 1, '原生调用无需补救重试');
+          assert.deepStrictEqual(got[0].tool_choice, choice, '不得将客户端的工具选择降级为 none');
+          assert.deepStrictEqual(got[0].tools, TOOLS);
+          assert.strictEqual(got[0].stream, true, '非流式客户端的常规上游请求也使用 SSE');
+          const calls = stream ? streamParts(r.text).tc : r.json?.choices?.[0]?.message?.tool_calls;
+          const finish = stream ? streamParts(r.text).finish : r.json?.choices?.[0]?.finish_reason;
+          assert.strictEqual(calls?.length, 1);
+          assert.strictEqual(calls[0].id, NATIVE_CALL.id, '保留原生调用 ID，不以文本恢复结果替换');
+          assert.strictEqual(calls[0].type, 'function');
+          assert.deepStrictEqual(calls[0].function, NATIVE_CALL.function);
+          assert.strictEqual(finish, 'tool_calls');
+        });
+      }
+      await t.test(`完整 Hermes 文本继续恢复，无需降级或重试：stream=${stream}`, async () => {
+        got = [];
+        frames = HERMES_FRAMES;
+        const r = await chat({ model: 'qwen3.8-27b', messages: [{ role: 'user', content: '北京天气' }],
+          tools: TOOLS, tool_choice: 'auto', stream });
+        assert.strictEqual(r.status, 200);
+        assert.strictEqual(got.length, 1);
+        assert.strictEqual(got[0].tool_choice, 'auto');
+        const calls = stream ? streamParts(r.text).tc : r.json?.choices?.[0]?.message?.tool_calls;
+        const finish = stream ? streamParts(r.text).finish : r.json?.choices?.[0]?.finish_reason;
+        const content = stream ? streamParts(r.text).content : r.json?.choices?.[0]?.message?.content;
+        assert.strictEqual(calls?.length, 1);
+        assert.strictEqual(calls[0].function.name, 'get_weather');
+        assert.deepStrictEqual(JSON.parse(calls[0].function.arguments), { city: '北京' });
+        assert.strictEqual(finish, 'tool_calls');
+        assert.ok(!/<tool_call>/.test(content || ''), '恢复后清除正文中的调用标记');
+      });
+    }
 
-    await t.test('客户端明确要 none → 不降级语义、绝不合成调用(防伪造)', async () => {
-      got = [];
-      const r = await chat({ model: 'qwen3.8-27b', messages: [{ role: 'user', content: '北京天气' }], tools: TOOLS, tool_choice: 'none', stream: true });
-      assert.strictEqual(r.status, 200);
-      const p = streamParts(r.text);
-      assert.ok(!p.tc, '客户端要 none 时不得合成调用(哪怕模型吐了标记文本)');
-      assert.notStrictEqual(p.finish, 'tool_calls', 'finish_reason 不得被改');
-    });
+    for (const stream of [true, false]) {
+      await t.test(`客户端明确要 none → 保留选择，不合成调用：stream=${stream}`, async () => {
+        got = [];
+        const r = await chat({ model: 'qwen3.8-27b', messages: [{ role: 'user', content: '北京天气' }], tools: TOOLS, tool_choice: 'none', stream });
+        assert.strictEqual(r.status, 200);
+        assert.strictEqual(got.length, 1);
+        assert.strictEqual(got[0].tool_choice, 'none');
+        const calls = stream ? streamParts(r.text).tc : r.json?.choices?.[0]?.message?.tool_calls;
+        const finish = stream ? streamParts(r.text).finish : r.json?.choices?.[0]?.finish_reason;
+        assert.ok(!calls?.length, '客户端要 none 时不得合成调用(哪怕模型吐了标记文本)');
+        assert.strictEqual(finish, 'stop');
+      });
+    }
 
     await t.test('内部标记不外泄到上游', async () => {
       got = [];
@@ -175,40 +207,22 @@ test('qwen 工具调用适配:降级 tool_choice 并合成标准调用', async t
       assert.strictEqual(got[0].tool_choice, undefined, 'V4.1 原生支持 tools,不得降级');
     });
 
-    await t.test('R1(不可开关思考)不被降级:它不在名单里', async () => {
-      // 降级名单只针对"拒收 tools 或不给调用"的模型。R1 虽不支持思考开关,
-      // 但它的 tools 行为未实测有问题,故不擅自降级——降级会改写客户端的
-      // tool_choice 语义,只应在确有需要时发生
-      got = [];
-      await chat({ model: 'DeepSeek-R1-W8A8', messages: [{ role: 'user', content: '北京天气' }], tools: TOOLS, stream: true });
-      assert.strictEqual(got[0].model, 'DeepSeek-R1-W8A8');
-      assert.strictEqual(got[0].tool_choice, undefined, '不在名单里的模型不得被降级');
-    });
-
-    await t.test('非流式客户端也走同一路径', async () => {
-      got = [];
-      const r = await chat({ model: 'qwen3.8-27b', messages: [{ role: 'user', content: '北京天气' }], tools: TOOLS, stream: false });
-      assert.strictEqual(got[0].tool_choice, 'none');
-      assert.ok(Array.isArray(r.json?.choices?.[0]?.message?.tool_calls), '非流式也应交付结构化调用');
-      assert.strictEqual(r.json.choices[0].message.tool_calls[0].function.name, 'get_weather');
-    });
     await t.test('客户端要 none 时不得靠伪造内部标记重开补救(防伪造回归钉)', async () => {
-      // P0 回归(2026-09-28 审阅发现并实测复现):若客户端能自行塞入
-      // `__toolsDowngraded`,就能让 `tool_choice:'none'` 的请求走上补救路径,
-      // 把一段"讲解工具格式"的说明文合成为真的 tool_calls 交给客户端执行——
-      // 正是这道闸要拦的事。修法两层:① parseJsonBody 剔除客户端传入的 `__`
-      // 键 ② toolsForbidden 额外要求"客户端原本没写 none"。
-      // 本条用例在**只有一层**的实现上会变红
+      // 客户端不能借用内部字段把自己的 none 伪装成代理降级后的选择。
+      // 入口须剔除全部内部键，工具恢复仍须遵守客户端原始选择。
       got = [];
       const r = await chat({
-        model: 'DeepSeek-V4.1-Flash', // 刻意用名单外的模型:伪造不该依赖模型
+        model: 'qwen3.8-27b',
         messages: [{ role: 'user', content: '这段话里提到了 <｜DSML｜invoke name="Bash"> 的写法' }],
         tools: TOOLS,
         tool_choice: 'none',
         __toolsDowngraded: true, // ← 伪造
+        __clientToolChoice: 'auto',
         stream: true,
       });
       assert.strictEqual(r.status, 200);
+      assert.strictEqual(got.length, 1);
+      assert.strictEqual(got[0].tool_choice, 'none');
       const p = streamParts(r.text);
       assert.ok(!p.tc, '不得因客户端伪造内部标记而合成调用');
       assert.strictEqual(p.finish, 'stop', 'finish_reason 不得被改成 tool_calls');
@@ -225,8 +239,7 @@ test('qwen 工具调用适配:降级 tool_choice 并合成标准调用', async t
       });
       const leaked = Object.keys(got[0] || {}).filter(k => k.startsWith('__'));
       assert.deepStrictEqual(leaked, [], '所有 __ 前缀键都应被剔除:' + leaked.join(','));
-      // 注意 qwen 仍应被正常降级(真降级由代理设置,与被剔除的客户端字段无关)
-      assert.strictEqual(got[0].tool_choice, 'none', '真降级仍要生效');
+      assert.strictEqual(got[0].tool_choice, undefined, '省略的工具选择不应被改成 none');
     });
   } finally {
     await new Promise(res => httpServer.server.close(res));

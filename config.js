@@ -56,15 +56,15 @@ const MODEL_PROFILES = {
     thinking: { thinkingParam: 'thinking', thinkingField: 'reasoning_content', effortOptions: ['low', 'high', 'max'] },
   },
   'qwen3.8-27b': {
-    // 输出边界与输入计量校准见 docs/TOKEN-BUDGET.md。
-    limits: { contextWindow: 262144, maxOutputTokens: 262000, promptTokenMarginRatio: 0.2 },
+    // 262000 适用于 SSE；非流式工具补救受 131072 限制，见 docs/TOKEN-BUDGET.md。
+    limits: { contextWindow: 262144, maxOutputTokens: 262000, maxNonstreamOutputTokens: 131072, promptTokenMarginRatio: 0.2 },
     thinking: { thinkingParam: 'enable_thinking', thinkingField: 'reasoning', effortOptions: ['low', 'medium', 'xhigh'] },
-    // 保留工具定义并降级 tool_choice，再尝试文本恢复；隔离已复现的缓存乱码。
-    rejectsTools: true,
+    // 2026-10-17 上游已返回原生 tool_calls；缓存乱码隔离仍保留。
     isolateCache: true,
   },
   'DeepSeek-R1-W8A8': {
-    limits: DEFAULT_LIMITS,
+    // 2026-10-17 报错确认共享窗口；输出预算还需扣除输入与模板余量。
+    limits: { contextWindow: 163840, maxOutputTokens: 163840 },
     thinking: { thinkingParam: null, thinkingField: 'content', effortOptions: ['low', 'medium', 'high'] },
   },
 };

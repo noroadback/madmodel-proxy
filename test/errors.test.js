@@ -137,17 +137,20 @@ test('映射: HTTP 400 保留参数错误，不转成可重试的 502', () => {
   assert.ok(m.message.includes('某错误'));
 });
 
-test('映射: HTTP 400 明确上下文超限，保留完整原文与标准 code', () => {
+test('映射: HTTP 400 或 HTTP 200 内嵌 code 400 明确上下文超限，保留原文与标准 code', () => {
   const messages = [
     "This model's maximum context length is 1048576 tokens. However, you requested 1048576 output tokens and your prompt contains 89 characters (more than 0 characters, which is the upper bound for 0 input tokens). Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_text, value=89)",
     "This model's maximum context length is 1048576 tokens. However, you requested 1047552 output tokens and your prompt contains at least 1025 input tokens, for a total of at least 1048577 tokens. Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_tokens, value=1025)",
+    "Requested token count exceeds the model's maximum context length of 163840 tokens. You requested a total of 163849 tokens: 9 tokens from the input messages and 163840 tokens for the completion. Please reduce the number of tokens in the input messages or the completion to fit within the limit.",
   ];
-  for (const message of messages) {
-    const m = translateUpstreamError({ error: { message, type: 'BadRequestError', code: 400 } }, '', 400);
-    assert.strictEqual(m.http, 400);
-    assert.strictEqual(m.type, 'invalid_request_error');
-    assert.strictEqual(m.code, 'context_length_exceeded');
-    assert.ok(m.message.includes(message));
+  for (const status of [200, 400]) {
+    for (const message of messages) {
+      const m = translateUpstreamError({ error: { message, type: 'BadRequestError', code: 400 } }, '', status);
+      assert.strictEqual(m.http, 400);
+      assert.strictEqual(m.type, 'invalid_request_error');
+      assert.strictEqual(m.code, 'context_length_exceeded');
+      assert.ok(m.message.includes(message));
+    }
   }
 });
 
@@ -167,30 +170,43 @@ test('映射: 标准 context_length_exceeded code 也支持 HTTP 200 内嵌错�
 });
 
 test('映射: 无效 max_tokens 不误报为上下文超限', () => {
-  const message = 'max_tokens must be greater than 0';
-  const m = translateUpstreamError({ error: { message, type: 'BadRequestError', code: 400 } }, '', 400, hintOver);
-  assert.strictEqual(m.http, 400);
-  assert.strictEqual(m.type, 'invalid_request_error');
-  assert.strictEqual(m.code, undefined);
-  assert.ok(m.message.includes(message));
-  assert.doesNotMatch(m.message, /上下文超限|稍后重试/);
+  for (const status of [200, 400]) {
+    for (const message of ['max_tokens must be greater than 0', 'Range of max_tokens should be [1, 131072]']) {
+      for (const code of [400, '400']) {
+        for (const body of [{ error: { message, type: 'BadRequestError', code } }, { message, code }]) {
+          const m = translateUpstreamError(body, '', status, hintOver);
+          assert.strictEqual(m.http, 400);
+          assert.strictEqual(m.type, 'invalid_request_error');
+          assert.strictEqual(m.code, undefined);
+          assert.ok(m.message.includes(message));
+          assert.doesNotMatch(m.message, /上下文超限|稍后重试/);
+        }
+      }
+    }
+  }
 });
 
-test('映射: 上下文文案只在 HTTP 400 下判定，不覆盖上游故障', () => {
-  const body = { error: { message: "This model's maximum context length is 1048576 tokens. Internal failure." } };
-  for (const status of [200, 500]) {
-    const m = translateUpstreamError(body, '', status);
-    assert.strictEqual(m.http, 502);
-    assert.strictEqual(m.code, undefined);
+test('映射: 上下文文案需要明确 400，不覆盖上游故障', () => {
+  for (const message of [
+    "This model's maximum context length is 1048576 tokens. Internal failure.",
+    "Requested token count exceeds the model's maximum context length of 163840 tokens. Internal failure.",
+  ]) {
+    for (const [status, code] of [[200, undefined], [200, 500], [500, undefined], [500, 400]]) {
+      const m = translateUpstreamError({ error: { message, code } }, '', status);
+      assert.strictEqual(m.http, 502);
+      assert.strictEqual(m.code, undefined);
+    }
   }
 });
 
 test('映射: 明确 HTTP 认证、端点、体积和限流状态仍优先', () => {
-  const body = { error: { message: 'context overflow', code: 'context_length_exceeded' } };
-  for (const [status, expected] of [[401, 401], [403, 401], [404, 502], [413, 413], [429, 429]]) {
-    const m = translateUpstreamError(body, '', status, hintOver);
-    assert.strictEqual(m.http, expected);
-    assert.strictEqual(m.code, undefined);
+  for (const code of ['context_length_exceeded', 400, '400']) {
+    const body = { error: { message: "Requested token count exceeds the model's maximum context length of 163840 tokens.", code } };
+    for (const [status, expected] of [[302, 502], [401, 401], [403, 401], [404, 502], [413, 413], [429, 429]]) {
+      const m = translateUpstreamError(body, '', status, hintOver);
+      assert.strictEqual(m.http, expected);
+      assert.strictEqual(m.code, undefined);
+    }
   }
 });
 
