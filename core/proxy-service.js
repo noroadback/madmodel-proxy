@@ -1,4 +1,4 @@
-// 请求编排：认证、参数归一、预算预检、流式转发与工具调用补救。
+// 请求编排：认证、参数归一、预算预检与流式转发。
 
 'use strict';
 
@@ -6,7 +6,6 @@ const { normalizePayload, parseJsonBody, fitTokenBudget, estimatePromptBudget } 
 const { translateUpstreamError, describeFailedStream } = require('./errors');
 const { createAggregator } = require('./completion-aggregator');
 const { getTokenizer } = require('./tokenizer');
-const { createToolRecovery, toolsForbidden } = require('./tool-recovery');
 const { getModelMeta } = require('./model-registry');
 const { readReasoningDelta, normalizeCompletionReasoning, normalizeReasoningDelta } = require('./thinking');
 
@@ -56,16 +55,15 @@ function normalizeToolCallFinish(choice, calls = choice?.message?.tool_calls) {
 }
 
 // 均速反映整次请求的等待、生成和交付，不冒充服务端纯解码速度。
-function performanceNote(ctx, usage, recovery = {}, now = Date.now()) {
+function performanceNote(ctx, usage, now = Date.now()) {
   const parts = [];
   const firstMs = ctx.firstOutputAt - ctx.started;
   if (Number.isFinite(firstMs) && firstMs >= 0) parts.push(`首字 ${(firstMs / 1000).toFixed(1)}s`);
-  const usages = recovery.retryAttempted ? [usage, recovery.retryUsage] : [usage];
   const elapsedMs = now - ctx.started;
-  if (elapsedMs > 0 && Number.isFinite(elapsedMs) && usages.every(u =>
-    Number.isFinite(u?.completion_tokens) && u.completion_tokens >= 0)) {
+  if (elapsedMs > 0 && Number.isFinite(elapsedMs) &&
+      Number.isFinite(usage?.completion_tokens) && usage.completion_tokens >= 0) {
     // completion_tokens 已含思考，不再加 reasoning_tokens。
-    const tokens = usages.reduce((n, u) => n + u.completion_tokens, 0);
+    const tokens = usage.completion_tokens;
     const rate = tokens * 1000 / elapsedMs;
     if (tokens > 0 && Number.isFinite(rate)) parts.push(`均速 ${rate.toFixed(1)} tok/s`);
   }
@@ -82,8 +80,6 @@ function createProxyService(deps) {
   }
 
   const metaFor = model => getModelMeta(config, modelRegistry, model);
-  const clientAskedTools = payload => Array.isArray(payload?.tools) && payload.tools.length > 0;
-  const recoverTools = createToolRecovery({ config, upstreamClient });
 
   function errorHeaders(result, status, extraHeaders) {
     return status === 429 && result.retryAfter
@@ -110,15 +106,12 @@ function createProxyService(deps) {
   }
 
   const tokTotal = { p: 0, c: 0 };
-  function usageNote(...usages) {
-    const known = usages.filter(u => u && typeof u.prompt_tokens === 'number' && typeof u.completion_tokens === 'number');
-    if (!known.length) return '';
-    const p = known.reduce((n, u) => n + u.prompt_tokens, 0);
-    const c = known.reduce((n, u) => n + u.completion_tokens, 0);
-    const r = known.reduce((n, u) => {
-      const value = u.reasoning_tokens ?? u.completion_tokens_details?.reasoning_tokens;
-      return n + (typeof value === 'number' ? value : 0);
-    }, 0);
+  function usageNote(usage) {
+    if (!usage || typeof usage.prompt_tokens !== 'number' || typeof usage.completion_tokens !== 'number') return '';
+    const p = usage.prompt_tokens;
+    const c = usage.completion_tokens;
+    const reasoning = usage.reasoning_tokens ?? usage.completion_tokens_details?.reasoning_tokens;
+    const r = typeof reasoning === 'number' ? reasoning : 0;
     tokTotal.p += p;
     tokTotal.c += c;
     const fmt = n => n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : (n >= 10000 ? `${(n / 1000).toFixed(1)}K` : String(n));
@@ -126,8 +119,8 @@ function createProxyService(deps) {
       ` 累计 ${fmt(tokTotal.p)}/${fmt(tokTotal.c)}`;
   }
 
-  function requestUsageNote(ctx, usage, recovery) {
-    return usageNote(usage, recovery.retryUsage) + performanceNote(ctx, usage, recovery);
+  function requestUsageNote(ctx, usage) {
+    return usageNote(usage) + performanceNote(ctx, usage);
   }
 
   function authenticateRequest() {
@@ -160,22 +153,11 @@ function createProxyService(deps) {
     const limits = typeof config.limitsFor === 'function' ? config.limitsFor(model) : null;
     normalizePayload(payload, model, metaFor(model),
       limits ? limits.maxOutputTokens : undefined);
-    downgradeToolsFor(payload, model);
     return {
       payload, clientWantsStream,
       contextWindow: limits ? limits.contextWindow : config.contextWindow,
       promptTokenMarginRatio: limits?.promptTokenMarginRatio || 0,
     };
-  }
-
-  // 仅为配置中明确拒收工具参数的模型降级；明确的客户端 none 不改。
-  function downgradeToolsFor(payload, model) {
-    const hasTools = Array.isArray(payload.tools) && payload.tools.length > 0;
-    const rejects = typeof config.rejectsTools === 'function' && config.rejectsTools(model);
-    if (!hasTools || !rejects || toolsForbidden(payload)) return;
-    payload.__clientToolChoice = payload.tool_choice;
-    payload.tool_choice = 'none';
-    payload.__toolsDowngraded = true;
   }
 
   function mapResult(result, prefix, sentBytes) {
@@ -314,35 +296,16 @@ function createProxyService(deps) {
     return inflightWait.promise;
   }
 
-  async function writeRecovered(ctx, model, calls, content, usage) {
-    const base = { id: `chatcmpl-toolfix-${Date.now().toString(36)}`,
-      object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model };
-    if (content) await ctx.writeSseChunk({ ...base, choices: [{ index: 0,
-      delta: { role: 'assistant', content }, finish_reason: null }] });
-    await ctx.writeSseChunk({ ...base, choices: [{ index: 0,
-      delta: { role: 'assistant', tool_calls: calls.map((tc, index) => ({ ...tc, index })) },
-      finish_reason: 'tool_calls' }] });
-    if (usage) await ctx.writeSseChunk({ ...base, choices: [], usage });
-    await ctx.writeSseLine('data: [DONE]\n\n');
-    ctx.endResponse();
-  }
-
   async function streamPassthrough(ctx, payload, auth, extraHeaders, budgetNote, ac, budgetHint) {
     const { req, started, size } = ctx;
     const servedModel = payload.model;
-    // 思考即时发送；正文与收尾暂存，确认无需补救或解析结束后发送。
-    // 工具调用即使关闭了文本补救也必须安全缓冲：arguments 是跨 SSE 帧
-    // 拼接的 JSON，不能在收到第一帧时交付。
-    const bufferFrames = config.toolCallFix && clientAskedTools(payload) && !toolsForbidden(payload);
+    // 正文与思考直接转发；原生工具调用需等跨帧 arguments 拼接并校验后交付。
     const spMeta = metaFor(payload.model);
     const streamThinkingField = spMeta && typeof spMeta.thinkingField === 'string' ? spMeta.thinkingField : null;
     if (typeof ctx.setThinkingFields === 'function') ctx.setThinkingFields(streamThinkingField);
     const buffered = [];
     let sawStructured = false;
     const structuredAgg = createAggregator(servedModel, streamThinkingField);
-    let streamFinish = null;
-    let bufferedText = '';       // 缓冲期间累积的 content(用于"先从文本解析")
-    let bufferedReasoning = '';  // 同时累积 reasoning(判据要看得见思考链,见下)
 
     const result = await upstreamClient.request({
       payload, token: auth.token, cookie: auth.cookie, signal: ac.signal,
@@ -357,17 +320,14 @@ function createProxyService(deps) {
           // buffered 中，以免改变客户端看到的标准 SSE 形态。
           structuredAgg.feed(obj);
         }
-        if (typeof d.content === 'string') bufferedText += d.content;
         const rDelta = readReasoningDelta(d, streamThinkingField);
-        if (rDelta !== null) bufferedReasoning += rDelta;
-        if (ch?.finish_reason) streamFinish = ch.finish_reason;
 
         // 一旦出现结构化工具调用，后续所有会影响消息完成状态的帧都留在
         // 缓冲中，直到 upstream-client 确认收到了 [DONE]。这样断流时只能
         // 关闭不完整响应，绝不会把半截 function.arguments 交给下游。
         if (sawStructured) {
           let held = obj;
-          // 混合帧先交付思考，避免替换正文时丢失它；工具调用本身仍扣留。
+          // 混合帧先交付思考，工具调用本身仍扣留。
           if (rDelta !== null) {
             normalizeReasoningDelta(held, streamThinkingField);
             const { reasoning_content, ...heldDelta } = held.choices[0].delta;
@@ -384,25 +344,6 @@ function createProxyService(deps) {
           return;
         }
 
-        if (bufferFrames) {
-          const hasHeld = (typeof d.content === 'string' && d.content !== '') ||
-            (Array.isArray(d.tool_calls) && d.tool_calls.length) || ch?.finish_reason || obj?.usage;
-          if (!hasHeld) {
-            ctx.ensureSseHeaders();
-            await ctx.writeSseChunk(obj);
-            return;
-          }
-          // 混合帧先交付思考，避免替换正文时丢失它。
-          if (rDelta !== null) {
-            normalizeReasoningDelta(obj, streamThinkingField);
-            const { reasoning_content, ...heldDelta } = obj.choices[0].delta;
-            await ctx.writeSseChunk({ ...obj, usage: undefined,
-              choices: [{ ...ch, delta: { reasoning_content }, finish_reason: null }] });
-            obj = { ...obj, choices: [{ ...ch, delta: heldDelta }] };
-          }
-          buffered.push(obj);
-          return; // content/finish 帧扣留,等正常收尾后决定
-        }
         ctx.ensureSseHeaders();
         await ctx.writeSseChunk(obj);
       },
@@ -467,32 +408,14 @@ function createProxyService(deps) {
       }
       for (const frame of buffered) normalizeToolCallFinish(frame.choices?.[0], calls);
     }
-    let recovery = {};
-    let originalUsage = result.usage;
-    if (result.type === 'stream' && bufferFrames && !sawStructured) {
-      const body = { choices: [{ message: { content: bufferedText, reasoning_content: bufferedReasoning },
-        finish_reason: streamFinish }], usage: result.usage };
-      recovery = await recoverTools(body, payload, auth, ac.signal, streamThinkingField);
-      if (ctx.clientGone()) return;
-      if (recovery.recovered) {
-        const msg = body.choices[0].message;
-        await writeRecovered(ctx, servedModel, msg.tool_calls, msg.content, body.usage);
-        logReq(req, 200, started, size,
-          `${recovery.note}${budgetNote}${requestUsageNote(ctx, originalUsage, recovery)}`, servedModel);
-        return;
-      }
-    }
     await flushBuffer();
     if (result.type === 'completion') {
-      originalUsage = result.body.usage;
       if (hasInvalidToolCalls(result.body)) {
         const message = '上游返回的工具调用参数不是有效 JSON，请重试。';
         logReq(req, 502, started, size, message, servedModel);
         return ctx.sendError(502, message);
       }
       normalizeToolCallFinish(result.body.choices?.[0]);
-      recovery = await recoverTools(result.body, payload, auth, ac.signal, streamThinkingField);
-      if (ctx.clientGone()) return;
       const m = result.body.choices?.[0]?.message || {};
       const fbReasoning = readReasoningDelta(m, streamThinkingField);
       const chunk = {
@@ -523,13 +446,13 @@ function createProxyService(deps) {
       }
       await ctx.writeSseLine('data: [DONE]\n\n');
       ctx.endResponse();
-      logReq(req, 200, started, size, `${recovery.note || '流式'}${budgetNote}${requestUsageNote(ctx, originalUsage, recovery)}`, servedModel);
+      logReq(req, 200, started, size, `流式${budgetNote}${requestUsageNote(ctx, result.body.usage)}`, servedModel);
       return;
     }
     if (ctx.sseHeadersSent()) {
       await ctx.writeSseLine('data: [DONE]\n\n');
       ctx.endResponse();
-      logReq(req, 200, started, size, `${recovery.note || '流式'}${budgetNote}${requestUsageNote(ctx, originalUsage, recovery)}`, servedModel);
+      logReq(req, 200, started, size, `流式${budgetNote}${requestUsageNote(ctx, result.usage)}`, servedModel);
     } else {
       logReq(req, 502, started, size, '上游返回空流', servedModel);
       ctx.sendError(502, '上游返回空流');
@@ -599,11 +522,9 @@ function createProxyService(deps) {
       return ctx.sendError(502, message);
     }
     normalizeToolCallFinish(out.choices?.[0]);
-    const originalUsage = result.type === 'completion' ? out.usage : agg.usage;
-    const recovery = await recoverTools(out, payload, auth, ac.signal, aggThinkingField);
-    if (ctx.clientGone()) return;
+    const usage = result.type === 'completion' ? out.usage : agg.usage;
     logReq(req, 200, started, size,
-      `${recovery.note || '完成'}${budgetNote}${requestUsageNote(ctx, originalUsage, recovery)}`, payload.model);
+      `完成${budgetNote}${requestUsageNote(ctx, usage)}`, payload.model);
     ctx.sendJson(200, out, extraHeaders);
   }
 

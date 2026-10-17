@@ -32,7 +32,6 @@
 
 'use strict';
 
-const { randomUUID } = require('crypto');
 const { SseParser } = require('./stream-parser');
 
 // 限量读:错误页/直答异常膨胀时及时放弃,不无限缓冲(超限抛 UPSTREAM_BODY_LIMIT)
@@ -56,9 +55,7 @@ async function readLimited(reader, limit, onProgress) {
   return Buffer.concat(parts);
 }
 
-// 剔除代理内部字段(`__` 前缀),再序列化发往上游。这些字段是代理各层之间传递
-// 状态的约定(如 payload.__toolsDowngraded 标记"tool_choice 是代理降级设置的,
-// 不同于客户端要求的 none"),**不应外泄给上游**:上游对未知字段的反应未经实测。
+// 剔除代理内部字段(`__` 前缀),再序列化发往上游；内部状态不进入上游请求。
 //
 // 放在这里而不是各调用点:本函数是唯一的序列化出口,一处覆盖流式、非流式、
 // 重发全部路径。原对象不变(返回浅拷贝),故调用方仍能读到自己的标记
@@ -81,9 +78,7 @@ function createUpstreamClient(config) {
     upstreamJsonBodyLimit, upstreamSseTotalLimit, sseLineLimit,
   } = config;
 
-  // 工具补救可用独立预算覆盖响应头超时；常规请求使用配置值。
-  function request({ payload, token, cookie, signal, onChunk, onOpen, headerTimeoutMs }) {
-    const headerTimeout = Number.isFinite(headerTimeoutMs) ? headerTimeoutMs : upstreamHeaderTimeout;
+  function request({ payload, token, cookie, signal, onChunk, onOpen }) {
     return new Promise((resolve) => {
       // 零字节截断时"已等待多久"的计时起点(见 truncated 结果的 idleMs)
       const requestStart = Date.now();
@@ -134,7 +129,7 @@ function createUpstreamClient(config) {
         lifecycle.abort(); // abort() 无抛出路径;中止尚未建立的连接
         cancelBody();
         finish({ type: 'timeout', phase: 'headers' });
-      }, headerTimeout);
+      }, upstreamHeaderTimeout);
 
       (async () => {
         // 请求体明文直发,不做 gzip。1.4.1 之前压缩过,为绕上游 WAF 的 SQL
@@ -153,13 +148,7 @@ function createUpstreamClient(config) {
         // 回传给签发它的 origin)
         if (cookie && tunnelMode) reqHeaders.Cookie = cookie;
 
-        let outgoingPayload = stripInternalFields(payload);
-        if (typeof config.isolateCacheFor === 'function' && config.isolateCacheFor(payload?.model)) {
-          // 每次实际发送时生成,覆盖正常请求与补救重发。客户端提供的固定 salt
-          // 也必须替换:重用它仍会命中异常缓存。只改发送副本,避免给重试共享的
-          // 原 payload 留下缓存状态;消息、工具及采样参数均保持原值。
-          outgoingPayload = { ...outgoingPayload, cache_salt: randomUUID() };
-        }
+        const outgoingPayload = stripInternalFields(payload);
         const up = await fetch(upstream, {
           method: 'POST',
           headers: reqHeaders,

@@ -16,7 +16,6 @@ const config = require('../config');
 
 const auth = { ok: true, token: 'synthetic-token', msLeft: 3600000 };
 const tools = ['Read', 'Write'].map(name => ({ type: 'function', function: { name, parameters: { type: 'object' } } }));
-const markup = name => `<｜DSML｜tool_use><｜DSML｜tool call="${name}"></｜DSML｜invoke></｜DSML｜tool_use>`;
 const native = name => ({ id: 'call-native', type: 'function', function: { name, arguments: '{}' } });
 const completion = (content, calls) => ({ choices: [{ index: 0, message: {
   role: 'assistant', content, ...(calls ? { tool_calls: calls } : {}),
@@ -70,38 +69,6 @@ async function run(body, responses, overrides = {}) {
   const ctx = context(body);
   await service.handleRequest(ctx);
   return { ctx, seen };
-}
-
-for (const stream of [true, false]) {
-  test(`非流式工具补救遵守逐模型输出上限，客户端流式=${stream}`, async () => {
-    for (const model of ['qwen3.8-27b', 'DeepSeek-V4.1-Flash', 'DeepSeek-R1-W8A8']) {
-      for (const budget of [undefined, 4096, 131072, 160000]) {
-        const { ctx, seen } = await run({ model, stream, tools,
-          tool_choice: 'auto', ...(budget === undefined ? {} : { max_tokens: budget }) }, [
-          { type: 'stream', body: completion('') },
-          { type: 'completion', body: completion('', [native('Read')]) },
-        ]);
-        assert.equal(seen.length, 2);
-        assert.equal(seen[0].stream, true);
-        assert.equal(seen[0].max_tokens, budget, '常规 SSE 请求仍使用原预算');
-        assert.equal(seen[1].stream, false);
-        assert.equal(seen[1].stream_options, undefined);
-        assert.equal(seen[1].max_tokens,
-          model === 'qwen3.8-27b' && budget > 131072 ? 131072 : budget);
-        assert.equal(seen[1].tool_choice, 'auto');
-        assert.deepEqual(delivered(ctx).choices[0].message.tool_calls, [native('Read')]);
-      }
-    }
-  });
-  test(`工具补救收到 SSE 时拒绝被聚合转换的非法字段，客户端流式=${stream}`, async () => {
-    const invalid = { ...native('Read'), function: { name: 'Read', arguments: ['{}'] } };
-    const { ctx, seen } = await run({ stream, tools }, [
-      { type: 'stream', body: completion('') },
-      { type: 'stream', body: completion('', [invalid]) },
-    ]);
-    assert.equal(seen.length, 2);
-    assert.equal(delivered(ctx).choices[0].message.tool_calls, undefined);
-  });
 }
 
 test('含图请求成功或失败时默认隐藏预算，调试模式保留分项', async t => {
@@ -288,51 +255,6 @@ for (const stream of [false, true]) {
       assert.strictEqual(ctx.out.status, 413);
       assert.strictEqual(seen.length, 0, '文字和工具本身超限时不发起上游调用');
     }
-  });
-
-  for (const transport of ['stream', 'completion']) {
-    test(`完整变体标记直接恢复，客户端流式=${stream}，上游=${transport}`, async () => {
-      const { ctx, seen } = await run({ stream, tools }, [{ type: transport, body: completion(markup('Write')) }]);
-      const body = delivered(ctx);
-      assert.equal(body.choices[0].message.tool_calls[0].function.name, 'Write');
-      assert.equal(body.choices[0].message.content, null);
-      assert.equal(seen.length, 1);
-    });
-    test(`指定工具名不会恢复其他工具，客户端流式=${stream}，上游=${transport}`, async () => {
-      const { ctx, seen } = await run({ stream, tools, tool_choice: { type: 'function', function: { name: 'Write' } } },
-        [{ type: transport, body: completion(markup('Read')) }]);
-      assert.equal(delivered(ctx).choices[0].message.tool_calls, undefined);
-      assert.deepEqual(seen[0].tool_choice, { type: 'function', function: { name: 'Write' } },
-        'Qwen 原生工具选择应原样发送');
-    });
-    for (const mode of ['none', 'disabled']) {
-      test(`工具恢复关闭不解析也不重试，${mode}，客户端=${stream}，上游=${transport}`, async () => {
-        const { ctx, seen } = await run({ stream, tools, tool_choice: mode === 'none' ? 'none' : 'auto' },
-          [{ type: transport, body: completion(markup('Write')) }], { toolCallFix: mode !== 'disabled' });
-        assert.equal(delivered(ctx).choices[0].message.content, markup('Write'));
-        assert.equal(delivered(ctx).choices[0].message.tool_calls, undefined);
-        assert.equal(seen.length, 1);
-      });
-    }
-  }
-  for (const name of ['Write', 'Read']) {
-    test(`重试保留合法原生调用并约束名称 ${name}，流式=${stream}`, async () => {
-      const { ctx, seen } = await run({ stream, tools, tool_choice: { type: 'function', function: { name: 'Write' } } }, [
-        { type: 'completion', body: completion('') },
-        { type: 'completion', body: completion('已准备', [native(name)]) },
-      ]);
-      const msg = delivered(ctx).choices[0].message;
-      assert.equal(msg.tool_calls?.[0]?.function.name, name === 'Write' ? 'Write' : undefined);
-      assert.equal(seen.length, 2);
-    });
-  }
-  test(`重试的截断调用不得执行，流式=${stream}`, async () => {
-    const retryBody = completion('', [native('Write')]);
-    retryBody.choices[0].finish_reason = 'length';
-    const { ctx } = await run({ stream, tools }, [
-      { type: 'completion', body: completion('') }, { type: 'completion', body: retryBody },
-    ]);
-    assert.equal(delivered(ctx).choices[0].message.tool_calls, undefined);
   });
 }
 

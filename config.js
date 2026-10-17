@@ -56,11 +56,8 @@ const MODEL_PROFILES = {
     thinking: { thinkingParam: 'thinking', thinkingField: 'reasoning_content', effortOptions: ['low', 'high', 'max'] },
   },
   'qwen3.8-27b': {
-    // 262000 适用于 SSE；非流式工具补救受 131072 限制，见 docs/TOKEN-BUDGET.md。
-    limits: { contextWindow: 262144, maxOutputTokens: 262000, maxNonstreamOutputTokens: 131072, promptTokenMarginRatio: 0.2 },
+    limits: { contextWindow: 262144, maxOutputTokens: 262000, promptTokenMarginRatio: 0.2 },
     thinking: { thinkingParam: 'enable_thinking', thinkingField: 'reasoning', effortOptions: ['low', 'medium', 'xhigh'] },
-    // 2026-10-17 上游已返回原生 tool_calls；缓存乱码隔离仍保留。
-    isolateCache: true,
   },
   'DeepSeek-R1-W8A8': {
     // 2026-10-17 报错确认共享窗口；输出预算还需扣除输入与模板余量。
@@ -89,12 +86,6 @@ module.exports = Object.freeze({
   models: Object.freeze([MODEL]),
   // 探测缺失时的思考能力兜底。
   thinkingFallback: THINKING_FALLBACK,
-  rejectsTools(model) {
-    return profileFor(model)?.rejectsTools === true;
-  },
-  isolateCacheFor(model) {
-    return profileFor(model)?.isolateCache === true;
-  },
   limitsFor(model) {
     return profileFor(model)?.limits || DEFAULT_LIMITS;
   },
@@ -131,11 +122,6 @@ module.exports = Object.freeze({
   // 请求编码与诊断
   debugBudget: process.env.PROXY_DEBUG_BUDGET === '1', // 预算明细仅在排障时输出
   dumpFailed: process.env.DUMP_FAILED === '1',  // 失败请求体落盘(默认关,隐私)
-
-  // 工具补救优先解析完整文本，必要时额外重发一次。
-  toolCallFix: process.env.PROXY_TOOL_FIX !== '0',
-  // 补救的头部与总时限共用此值，允许较慢的冷启动。
-  toolCallRetryTimeoutMs: numberEnv('PROXY_TOOL_RETRY_TIMEOUT_MS', 300e3),
 
   // watch 续期调度
   refreshAheadMs: numberEnv('PROXY_REFRESH_AHEAD_MS', 30 * 60 * 1000),

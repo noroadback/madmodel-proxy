@@ -7,13 +7,11 @@ const http = require('node:http');
 const config = require('../config');
 const { createHttpServer } = require('../adapters/http-server');
 const { createUpstreamClient } = require('../core/upstream-client');
-const { createToolRecovery } = require('../core/tool-recovery');
 
 const SETTINGS = [
   ['PROXY_BODY_LIMIT_MB', 'bodyLimit', 64 * 1048576],
   ['PROXY_HEADER_MS', 'upstreamHeaderTimeout', 300000],
   ['PROXY_IDLE_MS', 'streamIdleTimeout', 300000],
-  ['PROXY_TOOL_RETRY_TIMEOUT_MS', 'toolCallRetryTimeoutMs', 300000],
 ];
 
 function loadConfig(values = {}) {
@@ -42,11 +40,10 @@ test('请求限制默认值、环境覆盖与非法值回退', () => {
     for (const [key, field, fallback] of SETTINGS) assert.equal(cfg[field], fallback, `${key}=${value}`);
   }
   const cfg = loadConfig({ PROXY_BODY_LIMIT_MB: '1.5', PROXY_HEADER_MS: '4321',
-    PROXY_IDLE_MS: '5678', PROXY_TOOL_RETRY_TIMEOUT_MS: '6789' });
+    PROXY_IDLE_MS: '5678' });
   assert.equal(cfg.bodyLimit, 1.5 * 1048576);
   assert.equal(cfg.upstreamHeaderTimeout, 4321);
   assert.equal(cfg.streamIdleTimeout, 5678);
-  assert.equal(cfg.toolCallRetryTimeoutMs, 6789);
 });
 
 const listen = server => new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -196,34 +193,6 @@ test('外部取消在响应头前和首数据前均立即结束请求', async t 
         await within(phase === 'headers' ? arrived : opened.promise);
         ac.abort();
         assert.deepEqual(await within(pending), { type: 'aborted' });
-        await within(closed);
-      });
-    });
-  }
-});
-
-test('工具补救使用独立响应头预算，整次补救到期仍取消', async t => {
-  const tools = [{ type: 'function', function: { name: 'Read', parameters: { type: 'object' } } }];
-  const call = { id: 'call-test', type: 'function', function: { name: 'Read', arguments: '{}' } };
-  for (const succeeds of [true, false]) {
-    await t.test(succeeds ? '慢响应头成功' : '响应体等待到期', async () => {
-      await withUpstream(res => {
-        if (succeeds) delayed(res, () => {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ choices: [{ message: { content: null, tool_calls: [call] },
-            finish_reason: 'tool_calls' }] }));
-        });
-        else { res.writeHead(200, { 'Content-Type': 'application/json' }); res.flushHeaders(); }
-      }, { upstreamHeaderTimeout: 400, toolCallRetryTimeoutMs: succeeds ? 2500 : 400,
-        // 失败用例只应由补救总时限结束，不能被普通 idle 超时替代。
-        streamIdleTimeout: 10000 },
-      async ({ client, cfg, closed }) => {
-        const recover = createToolRecovery({ config: cfg, upstreamClient: client });
-        const original = { choices: [{ message: { content: '' }, finish_reason: 'stop' }] };
-        const result = await within(recover(original, { model: 'synthetic', tools }, { token: 'synthetic-token' }));
-        assert.equal(result.retryAttempted, true);
-        assert.equal(!!result.recovered, succeeds);
-        assert.deepEqual(original.choices[0].message.tool_calls, succeeds ? [call] : undefined);
         await within(closed);
       });
     });

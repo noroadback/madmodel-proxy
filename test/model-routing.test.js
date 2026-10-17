@@ -10,7 +10,7 @@ require('../scripts/isolated-env').isolate();
 // 环境注入必须在 require config/paths 之前(加载期读取)。
 // 本文件全程用 mock 上游,**不得依赖真实 token**——否则 token 一过期,
 // 代理会在到达 mock 之前就回 401,测试失败却与路由无关(2026-09-28 实际踩到:
-// 真实 token 过期 187 分钟导致 8 条用例全红)。与 toolcall-fix.test.js 同法
+// 真实 token 过期 187 分钟导致 8 条用例全红)。与 toolcall-delivery.test.js 同法
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
