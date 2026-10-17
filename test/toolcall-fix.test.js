@@ -340,6 +340,49 @@ test('工具调用补救(1.10.1)', async t => {
       assert.strictEqual(r.json.choices?.[0]?.message?.tool_calls?.[0]?.function?.name, 'Bash');
     });
 
+    await t.test('流式结构化调用中途断流时,不得把半截 arguments 交付给客户端', async () => {
+      seen = [];
+      mock.set((req, res) => {
+        req.resume();
+        req.on('end', () => {
+          seen.push(1);
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {
+            tool_calls: [{ index: 0, id: 'call_cut', type: 'function',
+              function: { name: 'Bash', arguments: '{"command":"Get-ChildItem ' } }],
+          }, finish_reason: null }] })}\n\n`);
+          // 故意不发 [DONE],模拟网关/上游在工具参数中间断开。
+          res.end();
+        });
+      });
+      const r = await chat(true, { tools: TOOLS });
+      assert.strictEqual(seen.length, 1);
+      assert.strictEqual(r.status, 502);
+      assert.ok(r.json?.error?.message.includes('截断'), r.text);
+      assert.ok(!r.text.includes('tool_calls'), '截断响应不得包含半截 tool_calls: ' + r.text);
+    });
+
+    await t.test('即使上游发了 DONE,无效 JSON 的工具参数也不得交付', async () => {
+      seen = [];
+      mock.set((req, res) => {
+        req.resume();
+        req.on('end', () => {
+          seen.push(1);
+          sse(res, [JSON.stringify({ choices: [{ index: 0, delta: {
+            tool_calls: [{ index: 0, id: 'call_bad', type: 'function',
+              function: { name: 'Bash', arguments: '{"command":' } }],
+          }, finish_reason: null }] }),
+          JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] }),
+          ]);
+        });
+      });
+      const r = await chat(true, { tools: TOOLS });
+      assert.strictEqual(seen.length, 1);
+      assert.strictEqual(r.status, 502);
+      assert.ok(r.json?.error?.message.includes('不是有效 JSON'), r.text);
+      assert.ok(!r.text.includes('tool_calls'), '无效参数不得交付: ' + r.text);
+    });
+
     // ---- 流式缓冲的冲刷路径(审阅者的变异实验指出这两条最敏感且当时无用例) ----
 
     await t.test('流式:命中补救失败时,缓冲帧仍完整交付(不得静默丢帧)', async () => {

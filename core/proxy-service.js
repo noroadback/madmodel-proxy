@@ -26,6 +26,27 @@ function recordFirstOutput(ctx, obj, thinkingField) {
   }
 }
 
+// 原生工具调用的 arguments 在 SSE 中通常被拆成多帧。只有整段拼完后，
+// 才能判断它是否是客户端可以安全写入下一轮请求的 JSON。这个检查放在
+// 代理交付边界，避免把上游断流留下的半截 arguments 传给 CC Switch。
+function validToolCalls(calls) {
+  if (!Array.isArray(calls) || !calls.length) return false;
+  return calls.every(tc => {
+    if (!tc || tc.type !== 'function' || typeof tc.id !== 'string' || !tc.id ||
+        typeof tc.function?.name !== 'string' || !tc.function.name ||
+        typeof tc.function.arguments !== 'string') return false;
+    try {
+      const args = JSON.parse(tc.function.arguments);
+      return args !== null && typeof args === 'object' && !Array.isArray(args);
+    } catch { return false; }
+  });
+}
+
+function hasInvalidToolCalls(body) {
+  const calls = body?.choices?.[0]?.message?.tool_calls;
+  return Array.isArray(calls) && calls.length > 0 && !validToolCalls(calls);
+}
+
 // 均速反映整次请求的等待、生成和交付，不冒充服务端纯解码速度。
 function performanceNote(ctx, usage, recovery = {}, now = Date.now()) {
   const parts = [];
@@ -302,14 +323,16 @@ function createProxyService(deps) {
     const { req, started, size } = ctx;
     const servedModel = payload.model;
     // 思考即时发送；正文与收尾暂存，确认无需补救或解析结束后发送。
+    // 工具调用即使关闭了文本补救也必须安全缓冲：arguments 是跨 SSE 帧
+    // 拼接的 JSON，不能在收到第一帧时交付。
     const bufferFrames = config.toolCallFix && clientAskedTools(payload) && !toolsForbidden(payload);
     const spMeta = metaFor(payload.model);
     const streamThinkingField = spMeta && typeof spMeta.thinkingField === 'string' ? spMeta.thinkingField : null;
     if (typeof ctx.setThinkingFields === 'function') ctx.setThinkingFields(streamThinkingField);
     const buffered = [];
     let sawStructured = false;
+    const structuredAgg = createAggregator(servedModel, streamThinkingField);
     let streamFinish = null;
-    let bufferFramesOff = false; // 见到结构化调用后停用缓冲,转逐帧透传
     let bufferedText = '';       // 缓冲期间累积的 content(用于"先从文本解析")
     let bufferedReasoning = '';  // 同时累积 reasoning(判据要看得见思考链,见下)
 
@@ -317,22 +340,43 @@ function createProxyService(deps) {
       payload, token: auth.token, cookie: auth.cookie, signal: ac.signal,
       onChunk: async (obj) => {
         recordFirstOutput(ctx, obj, streamThinkingField);
-        if (bufferFrames && !bufferFramesOff) {
-          const ch = obj?.choices?.[0];
-          const d = ch?.delta || {};
-          if (Array.isArray(d.tool_calls) && d.tool_calls.length) sawStructured = true;
-          if (typeof d.content === 'string') bufferedText += d.content;
-          const rDelta = readReasoningDelta(d, streamThinkingField);
-          if (rDelta !== null) bufferedReasoning += rDelta;
-          if (ch?.finish_reason) streamFinish = ch.finish_reason;
-          if (sawStructured) {
-            ctx.ensureSseHeaders();
-            for (const f of buffered) await ctx.writeSseChunk(f);
-            buffered.length = 0;
-            bufferFramesOff = true;
-            await ctx.writeSseChunk(obj);
-            return;
+        const ch = obj?.choices?.[0];
+        const d = ch?.delta || {};
+        const hasStructured = Array.isArray(d.tool_calls) && d.tool_calls.length > 0;
+        if (hasStructured) {
+          sawStructured = true;
+          // 聚合器只用于验证最终调用和检查 index；原始 delta 仍保留在
+          // buffered 中，以免改变客户端看到的标准 SSE 形态。
+          structuredAgg.feed(obj);
+        }
+        if (typeof d.content === 'string') bufferedText += d.content;
+        const rDelta = readReasoningDelta(d, streamThinkingField);
+        if (rDelta !== null) bufferedReasoning += rDelta;
+        if (ch?.finish_reason) streamFinish = ch.finish_reason;
+
+        // 一旦出现结构化工具调用，后续所有会影响消息完成状态的帧都留在
+        // 缓冲中，直到 upstream-client 确认收到了 [DONE]。这样断流时只能
+        // 关闭不完整响应，绝不会把半截 function.arguments 交给下游。
+        if (sawStructured) {
+          let held = obj;
+          // 混合帧先交付思考，避免替换正文时丢失它；工具调用本身仍扣留。
+          if (rDelta !== null) {
+            normalizeReasoningDelta(held, streamThinkingField);
+            const { reasoning_content, ...heldDelta } = held.choices[0].delta;
+            await ctx.writeSseChunk({ ...held, usage: undefined,
+              choices: [{ ...ch, delta: { reasoning_content }, finish_reason: null }] });
+            held = { ...held, choices: [{ ...ch, delta: heldDelta }] };
           }
+          const heldCh = held?.choices?.[0];
+          const heldDelta = heldCh?.delta || {};
+          const hasHeld = (typeof heldDelta.content === 'string' && heldDelta.content !== '') ||
+            (Array.isArray(heldDelta.tool_calls) && heldDelta.tool_calls.length) ||
+            heldCh?.finish_reason || held?.usage;
+          if (hasHeld) buffered.push(held);
+          return;
+        }
+
+        if (bufferFrames) {
           const hasHeld = (typeof d.content === 'string' && d.content !== '') ||
             (Array.isArray(d.tool_calls) && d.tool_calls.length) || ch?.finish_reason || obj?.usage;
           if (!hasHeld) {
@@ -349,7 +393,7 @@ function createProxyService(deps) {
             obj = { ...obj, choices: [{ ...ch, delta: heldDelta }] };
           }
           buffered.push(obj);
-          return; // content/tool_calls/finish 帧照旧扣留,等 finish 再决定
+          return; // content/finish 帧扣留,等正常收尾后决定
         }
         ctx.ensureSseHeaders();
         await ctx.writeSseChunk(obj);
@@ -400,6 +444,20 @@ function createProxyService(deps) {
       }
       return failRequest(ctx, mapped);
     }
+    if (result.type === 'stream' && sawStructured) {
+      const calls = structuredAgg.result().choices?.[0]?.message?.tool_calls;
+      if (!validToolCalls(calls)) {
+        const message = '上游返回的工具调用参数不是有效 JSON，请重试。';
+        if (ctx.sseHeadersSent()) {
+          ctx.endResponse();
+          logReq(req, 200, started, size, `stream-invalid-tool-call ${message}`, servedModel);
+        } else {
+          logReq(req, 502, started, size, message, servedModel);
+          ctx.sendError(502, message);
+        }
+        return;
+      }
+    }
     let recovery = {};
     let originalUsage = result.usage;
     if (result.type === 'stream' && bufferFrames && !sawStructured) {
@@ -418,6 +476,11 @@ function createProxyService(deps) {
     await flushBuffer();
     if (result.type === 'completion') {
       originalUsage = result.body.usage;
+      if (hasInvalidToolCalls(result.body)) {
+        const message = '上游返回的工具调用参数不是有效 JSON，请重试。';
+        logReq(req, 502, started, size, message, servedModel);
+        return ctx.sendError(502, message);
+      }
       recovery = await recoverTools(result.body, payload, auth, ac.signal, streamThinkingField);
       if (ctx.clientGone()) return;
       const m = result.body.choices?.[0]?.message || {};
@@ -520,6 +583,11 @@ function createProxyService(deps) {
     }
     const out = result.type === 'completion' ? result.body : agg.result();
     normalizeCompletionReasoning(out, aggThinkingField);
+    if (hasInvalidToolCalls(out)) {
+      const message = '上游返回的工具调用参数不是有效 JSON，请重试。';
+      logReq(req, 502, started, size, message, payload.model);
+      return ctx.sendError(502, message);
+    }
     const originalUsage = result.type === 'completion' ? out.usage : agg.usage;
     const recovery = await recoverTools(out, payload, auth, ac.signal, aggThinkingField);
     if (ctx.clientGone()) return;
