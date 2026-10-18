@@ -18,6 +18,7 @@ function numberEnv(name, fallback) {
 }
 
 const PORT = numberEnv('PROXY_PORT', 8080);
+const BODY_LIMIT = numberEnv('PROXY_BODY_LIMIT_MB', 64) * 1024 * 1024;
 
 // 非回环监听必须配置密钥，启动时由 core/listen-config.js 校验。
 const BIND_HOST = (process.env.PROXY_BIND_HOST || '127.0.0.1').trim().toLowerCase();
@@ -103,7 +104,9 @@ module.exports = Object.freeze({
   tokenFileInjected: !!process.env.PROXY_TOKEN_FILE,
 
   // 请求体上限保护本地内存，上游大小限制由其响应确定。
-  bodyLimit: numberEnv('PROXY_BODY_LIMIT_MB', 64) * 1024 * 1024,
+  bodyLimit: BODY_LIMIT,
+  // 上传和处理中请求的原始 JSON 总量；不小于单请求上限，不代表进程内存。
+  bodyBudget: Math.max(BODY_LIMIT, numberEnv('PROXY_BODY_BUDGET_MB', 256) * 1024 * 1024),
   bodyTimeout: 60e3,               // 请求体接收完成时限
 
   // 本地资源保护上限，不代表上游允许的并发量；上游拒绝另按 429 交付。

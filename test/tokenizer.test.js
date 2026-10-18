@@ -139,6 +139,65 @@ test('分词: 同文本重复计数一致(缓存路径)', () => {
 // 覆盖面为带种子的随机输入 + 显式同 rank 顺序用例。上游换分词器/改模板
 // 不在本测试检测范围(那需要重新跑 usage.prompt_tokens 对测)
 const { createTokenizer } = require('../core/tokenizer');
+
+// 缓存测试沿用 BPE 注入观察重算次数，不暴露缓存状态，也不缩小生产限额。
+const cacheTestModel = { model: { merges: [], vocab: {} } };
+
+test('缓存: 片段按字符预算 FIFO 逐出，仍在预算内的片段可复用', () => {
+  const length = 512 * 1024 - 1;
+  const pieces = ['a', 'b', 'c'].map(ch => ch.repeat(length));
+  const calls = { a: 0, b: 0, c: 0 };
+  const tokenizer = createTokenizer(cacheTestModel, { bpeImpl: piece => {
+    if (piece.length === length) calls[piece[0]]++;
+    return piece.length;
+  } });
+  for (const piece of pieces) assert.strictEqual(tokenizer.countText(piece), length);
+  // 两个片段合计略低于 1 Mi 字符；第三个只应挤走最早的 a。
+  // 加后缀绕开整段缓存，单独检验片段是否需要重算。
+  assert.strictEqual(tokenizer.countText(pieces[1] + '!'), length + 1);
+  assert.strictEqual(tokenizer.countText(pieces[0] + '!'), length + 1);
+  assert.deepStrictEqual(calls, { a: 2, b: 1, c: 1 });
+});
+
+test('缓存: 超大片段每次照常计数，不挤走已有小片段', () => {
+  const oversized = 'x'.repeat(1024 * 1024 + 1);
+  let smallCalls = 0, oversizedCalls = 0;
+  const tokenizer = createTokenizer(cacheTestModel, { bpeImpl: piece => {
+    if (piece === 'cached') smallCalls++;
+    if (piece.length === oversized.length) oversizedCalls++;
+    return piece.length;
+  } });
+  assert.strictEqual(tokenizer.countText('cached'), 6);
+  assert.strictEqual(tokenizer.countText(oversized), oversized.length);
+  assert.strictEqual(tokenizer.countText(oversized + '!'), oversized.length + 1);
+  assert.strictEqual(tokenizer.countText('cached!'), 7);
+  assert.strictEqual(oversizedCalls, 2);
+  assert.strictEqual(smallCalls, 1);
+});
+
+test('缓存: 超过整段预算的文本不缓存，且保留已有小文本', () => {
+  // 65,536 个不同单词使旧的仅按条数限额的片段缓存也逐出 cached。
+  // 这样随后重读 cached 只能命中整段缓存，不会被片段命中掩盖回归。
+  const prefix = 'x'.repeat(124);
+  const oversized = Array.from({ length: 65536 }, (_, i) => prefix + String.fromCharCode(
+    97 + (i >>> 12), 97 + (i >>> 8 & 15), 97 + (i >>> 4 & 15), 97 + (i & 15),
+  )).join('\n');
+  assert.ok(oversized.length > 8 * 1024 * 1024);
+  let smallCalls = 0, calls = 0;
+  const tokenizer = createTokenizer(cacheTestModel, { bpeImpl: piece => {
+    calls++;
+    if (piece === 'cached') smallCalls++;
+    return piece.length;
+  } });
+  assert.strictEqual(tokenizer.countText('cached'), 6);
+  assert.strictEqual(tokenizer.countText(oversized), oversized.length);
+  assert.strictEqual(tokenizer.countText('cached'), 6);
+  assert.strictEqual(smallCalls, 1);
+  const firstPassCalls = calls;
+  assert.strictEqual(tokenizer.countText(oversized), oversized.length);
+  assert.ok(calls > firstPassCalls, '超预算文本不应从整段缓存直接返回');
+});
+
 // 旧的数组扫描算法仅作为差分参照，不随产品模块加载。
 function referenceBpe(piece, mergeRank, vocab) {
   const parts = Array.from(piece);

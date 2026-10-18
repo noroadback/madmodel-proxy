@@ -86,7 +86,7 @@ npm start
 | 手动续期一次 | `npm run once` |
 | 清除本机凭据（先停止服务） | `node refresh-token.js logout` |
 
-日志记录上游实际 token 用量，累计值在代理重启后归零。首字按代理收到首个思考、正文或工具调用计时；均速包含等待。
+日志记录上游实际 token 用量，有明细时附加图片和缓存计数；这些明细已包含在输入总量中，不重复累计。未返回的用量保持未知，累计值在代理重启后归零。首字按代理收到首个思考、正文或工具调用计时；均速包含等待。
 
 凭据默认保存在 `~/.madmodel-proxy/`，与项目目录分开；`logout` 不撤销学校侧会话。服务默认仅监听本机且不校验 API Key，同机能访问端口的程序和用户均可调用。开启鉴权或供其他设备访问，见[局域网部署](docs/DEPLOY-LAN.md)；存储方式与数据流向见[安全说明](SECURITY.md)。
 
@@ -147,10 +147,13 @@ PROXY_PORT=8081 npm start
 | `PROXY_BIND_HOST` | `127.0.0.1` | 监听地址；非回环地址必须配置密钥 |
 | `PROXY_API_KEYS` | 未设置 | 逗号分隔的访问密钥 |
 | `PROXY_BODY_LIMIT_MB` | `64` | 请求体上限，单位 MiB，包含图片数据 |
+| `PROXY_BODY_BUDGET_MB` | `256` | 上传和处理中请求体的总量预算，单位 MiB，至少为单请求上限 |
 | `PROXY_NO_UPDATE_CHECK` | 未设置 | `1` 关闭启动时的版本检查 |
 | `MADMODEL_STATE_DIR` | `~/.madmodel-proxy/` | 凭据与状态目录 |
 
 `PROXY_UPSTREAM` 会接收对话和 Bearer token，仅配置可信服务。该变量在启动时优先于网络选择；运行窗口中的 `campus` / `offcampus` 可覆盖当前地址，下次启动仍以环境变量为准。
+
+请求体总量按原始 JSON 字节计量，额度保留到请求处理结束，容量不足时返回 429。解析、转发和分词另有内存开销，该预算不代表进程内存上限。
 
 <details>
 <summary>超时、续期与排障参数</summary>

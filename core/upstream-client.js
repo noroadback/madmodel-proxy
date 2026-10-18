@@ -55,10 +55,7 @@ async function readLimited(reader, limit, onProgress) {
   return Buffer.concat(parts);
 }
 
-// 剔除代理内部字段(`__` 前缀),再序列化发往上游；内部状态不进入上游请求。
-//
-// 放在这里而不是各调用点:本函数是唯一的序列化出口,一处覆盖流式、非流式、
-// 重发全部路径。原对象不变(返回浅拷贝),故调用方仍能读到自己的标记
+// 在唯一的序列化出口剔除保留的 `__` 顶层字段，不修改调用方的对象。
 function stripInternalFields(payload) {
   if (!payload || typeof payload !== 'object') return payload;
   let out = null;

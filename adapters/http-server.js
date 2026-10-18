@@ -3,7 +3,7 @@
 // (Content-Length 预检/限额/超时)、响应写出(JSON/SSE/错误)、token 文件的
 // mtime 热加载缓存。业务判定在 core/proxy-service.js。
 // 本模块是 core 与 platform 之间的装配点:core 不接触 req/res/fs。
-// 本地无鉴权:只监听 127.0.0.1 + Host 白名单即为本机边界(边界说明见 SECURITY.md)。
+// 默认回环监听；可配置 API Key 和局域网访问，边界说明见 SECURITY.md。
 
 'use strict';
 
@@ -100,7 +100,7 @@ function bodyLimitMessage(limit) {
   return `请求体超过本地 ${limit / 1048576} MiB 上限，请缩小图片或缩短对话。`;
 }
 
-function readBody(req, limit, timeout) {
+function readBody(req, limit, timeout, reserve) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
@@ -129,12 +129,22 @@ function readBody(req, limit, timeout) {
         reject(e);
         return;
       }
+      try { reserve(size); }
+      catch (e) {
+        aborted = true;
+        cleanup();
+        e.size = size;
+        reject(e);
+        return;
+      }
       chunks.push(c);
     };
     const onEnd = () => {
       if (aborted) return;
+      aborted = true;
+      const rawBody = Buffer.concat(chunks);
       cleanup();
-      resolve({ rawBody: Buffer.concat(chunks), size });
+      resolve({ rawBody, size });
     };
     const onError = () => {
       // 客户端断开:无响应可写,静默放弃
@@ -151,14 +161,17 @@ function readBody(req, limit, timeout) {
       req.removeListener('data', onData);
       req.removeListener('end', onEnd);
       req.removeListener('error', onError);
+      req.removeListener('aborted', onError);
+      chunks.length = 0;
     }
     req.on('data', onData);
     req.on('end', onEnd);
     req.on('error', onError);
+    req.on('aborted', onError);
   });
 }
 
-async function readChatBody(req, config) {
+async function readChatBody(req, config, reserve) {
   // Content-Length 预检:超限在收任何 body 字节前就拒绝,不陪慢速攻击者耗资源
   const declaredLen = Number(req.headers['content-length']);
   if (Number.isFinite(declaredLen) && declaredLen > config.bodyLimit) {
@@ -168,7 +181,9 @@ async function readChatBody(req, config) {
     e.note = 'cl-precheck';
     throw e;
   }
-  const { rawBody, size } = await readBody(req, config.bodyLimit, config.bodyTimeout);
+  // 已知长度先预留，chunked 按实际接收量递增；读取完成后仍保留到业务结束。
+  if (Number.isFinite(declaredLen) && declaredLen > 0) reserve(declaredLen);
+  const { rawBody, size } = await readBody(req, config.bodyLimit, config.bodyTimeout, reserve);
   if (!size) {
     const e = new Error('请求体为空');
     e.code = 'EMPTY_BODY';
@@ -226,6 +241,8 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
     bindAuthority, `${bindAuthority}:${config.port}`,
   ]);
   const tokenState = createTokenState(getToken);
+  const bodyBudget = config.bodyBudget ?? Math.max(256 * 1048576, config.bodyLimit);
+  let pendingBodyBytes = 0;
 
   const server = http.createServer((req, res) => {
     const started = Date.now();
@@ -339,7 +356,18 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
       return openAiError(res, 404, '端点不存在。可用:POST /v1/chat/completions,GET /v1/models');
     }
 
-    readChatBody(req, config).then(
+    let reservedBytes = 0;
+    const reserve = size => {
+      const additional = Math.max(0, size - reservedBytes);
+      if (pendingBodyBytes + additional > bodyBudget) {
+        const error = new Error('本地请求容量已满，请降低并发或稍后重试。');
+        error.code = 'BODY_BUSY';
+        throw error;
+      }
+      pendingBodyBytes += additional;
+      reservedBytes += additional;
+    };
+    readChatBody(req, config, reserve).then(
       ({ rawBody, size }) => handleChat(req, res, rawBody, size, started),
       e => handleReadError(req, res, e, started)
     ).catch(e => {
@@ -350,27 +378,37 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
       } else {
         res.end();
       }
+    }).finally(() => {
+      pendingBodyBytes -= reservedBytes;
+      reservedBytes = 0;
     });
   });
 
   // 读取阶段错误的响应映射(鉴权已过;body 层错误在进入业务前挡回)
+  function closeUpload(req, res) {
+    // 让错误响应先发出，再断开未读完的上传；短兜底防止客户端不读响应。
+    res.once('finish', () => req.destroy());
+    setTimeout(() => req.destroy(), 2000).unref();
+  }
+
   function handleReadError(req, res, e, started) {
     if (e.code === 'CLIENT_ABORT') return; // 客户端已断开,无响应可写
+    if (e.code === 'BODY_BUSY') {
+      service.logReq(req, 429, started, e.size || 0, e.message);
+      closeUpload(req, res);
+      openAiError(res, 429, e.message, 'rate_limit', { Connection: 'close' });
+      return;
+    }
     if (e.code === 'BODY_TIMEOUT') {
       service.logReq(req, 408, started, e.size || 0, e.message);
-      openAiError(res, 408, e.message);
-      req.destroy();
+      closeUpload(req, res);
+      openAiError(res, 408, e.message, undefined, { Connection: 'close' });
       return;
     }
     if (e.code === 'BODY_TOO_LARGE') {
       service.logReq(req, 413, started, e.size || 0, e.message);
-      openAiError(res, 413, e.message);
-      if (e.note === 'body-overflow') {
-        // 先让 413 冲出内核缓冲再断开:立即 destroy 会连未发出的响应一起丢掉,
-        // 客户端将看到连接重置而非 413;2s 兜底防客户端无限续传
-        res.once('finish', () => req.destroy());
-        setTimeout(() => { try { req.destroy(); } catch (err) { /* 连接已断 */ } }, 2000).unref();
-      }
+      closeUpload(req, res);
+      openAiError(res, 413, e.message, undefined, { Connection: 'close' });
       return;
     }
     if (e.code === 'EMPTY_BODY') {

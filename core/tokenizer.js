@@ -19,11 +19,11 @@ function buildByteToUni() {
   return map;
 }
 
-// 两级缓存的内存边界(长驻进程,缓存必须封顶,否则任意流量下慢速泄漏):
-// piece 级按条目数封顶(piece 是短串,条目数即内存量级);文本级按 key 的
-// 字符总量封顶——它钉住的是整条消息字符串,大消息会话下按条目数封顶
-// 挡不住体积,按字符预算逐出才能压住。均 FIFO(Map 保持插入序)
+// 两级缓存都按 key 的字符总量封顶；piece 还限条目数，约束大量短片段。
+// piece 可能是无标点长串，byte-level 映射后的字符数等于原始 UTF-8 字节数。
+// 超过预算的单项只计数不缓存，也不挤走已有小项。均 FIFO(Map 保持插入序)。
 const PIECE_CACHE_LIMIT = 65536;
+const PIECE_CACHE_CHARS = 1 * 1024 * 1024;
 const TEXT_CACHE_CHARS = 8 * 1024 * 1024;
 
 // ---- BPE 合并的实现(模块级,签名为 (piece, mergeRank, vocab) -> token 数) ----
@@ -31,8 +31,8 @@ const TEXT_CACHE_CHARS = 8 * 1024 * 1024;
 // 堆式实现(1.8.1 起的生产路径):链表 + 最小堆,整体 O(n log n)。
 // 正确性约束(与测试中的旧算法对照，见 test/tokenizer.test.js):
 //   - 每次合并取 merge rank 最小的相邻对,同 rank 取最左出现。堆排序键为
-//     (rank, 左节点票据),票据由存活的左节点继承,恒等于该节点最左成分
-//     字符的初始位置——链表顺序不变,小票据即靠左
+//     (rank, 左节点下标),左节点吸收右节点后仍在最左成分字符的初始位置，
+//     链表顺序不变,小下标即靠左
 //   - rank 与 pair 字符串一一对应(mergeRank 是双射),弹出时重查
 //     rank 与相邻关系即可完成惰性失效校验(节点死亡/字符变/相邻变都拒)
 // 取代旧实现的原因:数组全扫描 + splice 最坏 O(n²),8KB 同字符实测
@@ -45,11 +45,11 @@ function heapBpe(piece, mergeRank, vocab) {
   // alive 是失效校验的关键:被吸收的节点其 nxt/ch 都不会被改写,仅凭
   // nxt[li]===ri 与 rank 复查无法识别死节点(实测在代码密集样本上翻车),
   // 必须显式查存活
-  const ch = new Array(n), prv = new Array(n), nxt = new Array(n), ticket = new Array(n);
+  const ch = new Array(n), prv = new Array(n), nxt = new Array(n);
   const alive = new Array(n).fill(true);
-  for (let i = 0; i < n; i++) { ch[i] = piece[i]; prv[i] = i - 1; nxt[i] = i + 1; ticket[i] = i; }
+  for (let i = 0; i < n; i++) { ch[i] = piece[i]; prv[i] = i - 1; nxt[i] = i + 1; }
   nxt[n - 1] = -1;
-  const heap = []; // 条目 [rank, 票据, 左id, 右id]
+  const heap = []; // 条目 [rank, 左id, 右id]；左id 同时用于同 rank 时的排序
   const lt = (a, b) => a[0] < b[0] || (a[0] === b[0] && a[1] < b[1]);
   const hpush = e => {
     heap.push(e);
@@ -80,10 +80,10 @@ function heapBpe(piece, mergeRank, vocab) {
   };
   for (let i = 0; i + 1 < n; i++) {
     const r = mergeRank.get(ch[i] + ' ' + ch[i + 1]);
-    if (r !== undefined) hpush([r, i, i, i + 1]);
+    if (r !== undefined) hpush([r, i, i + 1]);
   }
   while (heap.length) {
-    const [rank, , li, ri] = hpop();
+    const [rank, li, ri] = hpop();
     if (!alive[li] || !alive[ri] || nxt[li] !== ri) continue; // 惰性失效:死节点或相邻关系已变
     if (mergeRank.get(ch[li] + ' ' + ch[ri]) !== rank) continue; // 左字符已变
     ch[li] += ch[ri];
@@ -94,11 +94,11 @@ function heapBpe(piece, mergeRank, vocab) {
     const p = prv[li];
     if (p !== -1) {
       const r = mergeRank.get(ch[p] + ' ' + ch[li]);
-      if (r !== undefined) hpush([r, ticket[p], p, li]);
+      if (r !== undefined) hpush([r, p, li]);
     }
     if (after !== -1) {
       const r = mergeRank.get(ch[li] + ' ' + ch[after]);
-      if (r !== undefined) hpush([r, ticket[li], li, after]);
+      if (r !== undefined) hpush([r, li, after]);
     }
   }
   let c = 0;
@@ -133,6 +133,7 @@ function createTokenizer(model, opts = {}) {
   }
 
   const pieceCache = new Map(); // piece(byte-level 映射后) -> token 数
+  let pieceCacheChars = 0;
   // BPE 实现可注入(opts.bpeImpl,签名 (piece, mergeRank, vocab) -> token 数):
   // 默认堆式，测试可注入旧算法做差分验证。
   const bpeImpl = typeof opts.bpeImpl === 'function' ? opts.bpeImpl : heapBpe;
@@ -140,10 +141,14 @@ function createTokenizer(model, opts = {}) {
     let c = pieceCache.get(piece);
     if (c !== undefined) return c;
     c = bpeImpl(piece, mergeRank, vocab);
-    if (pieceCache.size >= PIECE_CACHE_LIMIT) {
-      pieceCache.delete(pieceCache.keys().next().value);
+    if (piece.length > PIECE_CACHE_CHARS) return c;
+    while (pieceCache.size >= PIECE_CACHE_LIMIT || pieceCacheChars + piece.length > PIECE_CACHE_CHARS) {
+      const oldest = pieceCache.keys().next().value;
+      pieceCacheChars -= oldest.length;
+      pieceCache.delete(oldest);
     }
     pieceCache.set(piece, c);
+    pieceCacheChars += piece.length;
     return c;
   }
 
@@ -166,6 +171,7 @@ function createTokenizer(model, opts = {}) {
       for (const b of bytes) mapped += byteToUni.get(b);
       c += bpeCount(mapped);
     }
+    if (text.length > TEXT_CACHE_CHARS) return c;
     while (textCacheChars + text.length > TEXT_CACHE_CHARS && textCache.size > 0) {
       const oldest = textCache.keys().next().value;
       textCacheChars -= oldest.length;

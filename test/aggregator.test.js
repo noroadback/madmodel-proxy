@@ -18,11 +18,11 @@ test('聚合: content 增量拼接,空内容时为 null', () => {
   assert.strictEqual(out.choices[0].finish_reason, 'stop');
 });
 
-test('聚合: 无任何 feed 时 content 为 null 且 usage 补零', () => {
+test('聚合: 无任何 feed 时 content 与未知 usage 均为 null', () => {
   const agg = createAggregator('M');
   const out = agg.result();
   assert.strictEqual(out.choices[0].message.content, null);
-  assert.deepStrictEqual(out.usage, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+  assert.strictEqual(out.usage, null);
   assert.strictEqual(out.model, 'M');
 });
 

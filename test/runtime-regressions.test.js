@@ -111,6 +111,31 @@ test('含图请求成功或失败时默认隐藏预算，调试模式保留分�
   }
 });
 
+test('新用量明细跨流式、聚合和工具路径完整保留，缺失用量不补零', async t => {
+  t.mock.method(console, 'log', () => {});
+  const measured = { prompt_tokens: 200, completion_tokens: 3, total_tokens: 203,
+    prompt_tokens_details: { image_tokens: 184, cached_tokens: 0, future_field: { value: 42 } } };
+  const cases = [measured, { ...measured, prompt_tokens_details: null },
+    { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }, null, undefined];
+  for (const stream of [false, true]) for (const type of ['stream', 'completion']) {
+    for (const calls of [undefined, [native('Read')]]) for (const usage of cases) {
+      const body = completion('ok', calls);
+      if (usage === undefined) delete body.usage;
+      else body.usage = usage;
+      const { ctx, seen } = await run({ stream, tools, stream_options: { include_usage: false } }, [{ type, body }]);
+      assert.equal(seen.length, 1);
+      assert.equal(seen[0].stream_options.include_usage, false);
+      if (!stream) {
+        assert.deepEqual(ctx.out.body.usage, type === 'stream' ? usage ?? null : usage);
+      } else {
+        const all = [...ctx.out.chunks, ...ctx.out.lines.filter(l => l.startsWith('data: {'))
+          .map(l => JSON.parse(l.slice(6)))];
+        assert.deepEqual(all.find(c => c.usage)?.usage, usage || undefined);
+      }
+    }
+  }
+});
+
 test('图像用量原样返回，相同请求的输出预算不受历史 usage 影响', async t => {
   const logs = [];
   t.mock.method(console, 'log', (...args) => logs.push(args.join(' ')));

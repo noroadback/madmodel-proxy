@@ -7,12 +7,8 @@ const { estimateVisionBudget } = require('./vision-budget');
 
 const UPSTREAM_REJECTED = ['logprobs', 'top_logprobs'];
 
-// 内部状态在入口剔除，防止客户端伪造工具降级标记并绕过 tool_choice:none。
-const INTERNAL_PREFIX = '__';
-
 // JSON 解析与形态校验:非 JSON / 非对象(null/数组/标量)按 400 挡在业务之前。
 // 错误带 code(INVALID_JSON / INVALID_PAYLOAD)与面向用户的消息。
-// 同时剔除 `__` 前缀的内部保留键(见 INTERNAL_PREFIX 说明)
 function parseJsonBody(rawBody) {
   let payload;
   try { payload = JSON.parse(rawBody.toString('utf8')); }
@@ -25,11 +21,6 @@ function parseJsonBody(rawBody) {
     const err = new Error('请求体必须是 JSON 对象(chat completion 格式)');
     err.code = 'INVALID_PAYLOAD';
     throw err;
-  }
-  // 剔除内部保留键。静默剔除而非 400:客户端并不需要这些键,报错只会让
-  // 用户看到一个看不懂的失败;剔除后行为与"没发这个键"完全一致
-  for (const k of Object.keys(payload)) {
-    if (k.startsWith(INTERNAL_PREFIX)) delete payload[k];
   }
   return payload;
 }

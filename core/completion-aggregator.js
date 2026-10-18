@@ -74,7 +74,7 @@ function createAggregator(model = '', thinkingField = null) {
         created: this.created || Math.floor(Date.now() / 1000),
         model: this.model,
         choices: [{ index: 0, message, finish_reason: this.finish || 'stop' }],
-        usage: this.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+        usage: this.usage,
       };
     },
   };

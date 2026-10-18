@@ -107,15 +107,21 @@ function createProxyService(deps) {
 
   const tokTotal = { p: 0, c: 0 };
   function usageNote(usage) {
-    if (!usage || typeof usage.prompt_tokens !== 'number' || typeof usage.completion_tokens !== 'number') return '';
+    const valid = n => Number.isFinite(n) && n >= 0;
+    if (!valid(usage?.prompt_tokens) || !valid(usage?.completion_tokens)) return '';
     const p = usage.prompt_tokens;
     const c = usage.completion_tokens;
     const reasoning = usage.reasoning_tokens ?? usage.completion_tokens_details?.reasoning_tokens;
-    const r = typeof reasoning === 'number' ? reasoning : 0;
+    const details = [];
+    if (valid(reasoning) && reasoning > 0) details.push(`思考 ${reasoning}`);
+    for (const [field, label] of [['image_tokens', '图片'], ['cached_tokens', '缓存']]) {
+      const value = usage.prompt_tokens_details?.[field];
+      if (valid(value)) details.push(`${label} ${value}`);
+    }
     tokTotal.p += p;
     tokTotal.c += c;
     const fmt = n => n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : (n >= 10000 ? `${(n / 1000).toFixed(1)}K` : String(n));
-    return ` | token ${p}/${c}` + (r ? `(思考 ${r})` : '') +
+    return ` | token ${p}/${c}` + (details.length ? `(${details.join(' · ')})` : '') +
       ` 累计 ${fmt(tokTotal.p)}/${fmt(tokTotal.c)}`;
   }
 
@@ -197,45 +203,13 @@ function createProxyService(deps) {
     const extraHeaders = auth.msLeft < 30 * 60 * 1000 ? { 'X-Token-Refresh-Hint': 'expiring' } : {};
     ctx.setExtraHeaders(extraHeaders);
 
-    const prepared = preparePayload(ctx);
-    if (prepared.error) {
-      logReq(ctx.req, 400, ctx.started, ctx.size, prepared.error.message);
-      return ctx.sendError(400, prepared.error.message);
-    }
-    const { payload, clientWantsStream, contextWindow, promptTokenMarginRatio } = prepared;
-
-    const promptTokens = getTokenizer().countPromptTokens(payload);
-    const estimate = estimatePromptBudget(payload, promptTokens, promptTokenMarginRatio);
-    const fit = fitTokenBudget(promptTokens, payload, contextWindow, estimate);
-    if (config.debugBudget) {
-      // 仅排障时记录；本地拒绝、上游拒绝、断流和超时也保留预算依据。
-      // 100 仅为本地日志的阶段标记，不向客户端发送额外 HTTP 响应。
-      const outputBudgetForLog = payload.max_tokens === undefined ? '未指定'
-        : typeof payload.max_tokens === 'number' && Number.isFinite(payload.max_tokens)
-          ? payload.max_tokens : '无效';
-      const budgetDetails = `预算[文本=${promptTokens} 模板=${estimate.baseReserveTokens}` +
-        ` 工具=${estimate.toolReserveTokens} 文本误差=${estimate.marginTokens}` +
-        ` 图片=${estimate.imageCount} 图像估值=${estimate.imageTokensEstimate}` +
-        ` 图像余量=${estimate.imageMarginTokens} 来源=${estimate.imageEstimateSource}` +
-        ` 输出=${outputBudgetForLog} 窗口=${contextWindow}]`;
-      logReq(ctx.req, 100, ctx.started, ctx.size, budgetDetails, payload.model);
-    }
-    if (!fit.ok) {
-      logReq(ctx.req, 413, ctx.started, ctx.size, fit.message, payload.model);
-      return ctx.sendError(413, fit.message);
-    }
-    const budgetNote = config.debugBudget && fit.note ? ` 输出预算 ${payload.max_tokens}` : '';
-    const budgetHint = {
-      ...estimate, promptTokens, contextWindow,
-      tokenBudget: typeof payload.max_tokens === 'number' ? payload.max_tokens : 0,
-    };
-
     const ac = ctx.abortController;
+    let payload;
     let inflightHeld = false;
     const hold = () => {
       if (inflightHeld) return true;
       if (inflight >= config.inflightHardLimit) {
-        logReq(ctx.req, 429, ctx.started, ctx.size, `并发已满 ${inflight}/${config.inflightHardLimit}`, payload.model);
+        logReq(ctx.req, 429, ctx.started, ctx.size, `并发已满 ${inflight}/${config.inflightHardLimit}`, payload?.model);
         ctx.sendError(429, `并发请求已达上限 ${config.inflightHardLimit}，请降低并发或稍后重试。`, 'rate_limit');
         return false;
       }
@@ -244,8 +218,40 @@ function createProxyService(deps) {
       return true;
     };
     const release = () => { if (inflightHeld) { inflightHeld = false; inflight--; } };
+    // 过载时先拒绝，不解析大 JSON 或同步分词；所有预检出口都归还槽位。
     if (!hold()) return;
     try {
+      const prepared = preparePayload(ctx);
+      if (prepared.error) {
+        logReq(ctx.req, 400, ctx.started, ctx.size, prepared.error.message);
+        return ctx.sendError(400, prepared.error.message);
+      }
+      const { clientWantsStream, contextWindow, promptTokenMarginRatio } = prepared;
+      payload = prepared.payload;
+      const promptTokens = getTokenizer().countPromptTokens(payload);
+      const estimate = estimatePromptBudget(payload, promptTokens, promptTokenMarginRatio);
+      const fit = fitTokenBudget(promptTokens, payload, contextWindow, estimate);
+      if (config.debugBudget) {
+        // 100 仅为日志阶段标记；本地拒绝、上游拒绝和断流均保留预算依据。
+        const outputBudgetForLog = payload.max_tokens === undefined ? '未指定'
+          : typeof payload.max_tokens === 'number' && Number.isFinite(payload.max_tokens)
+            ? payload.max_tokens : '无效';
+        const budgetDetails = `预算[文本=${promptTokens} 模板=${estimate.baseReserveTokens}` +
+          ` 工具=${estimate.toolReserveTokens} 文本误差=${estimate.marginTokens}` +
+          ` 图片=${estimate.imageCount} 图像估值=${estimate.imageTokensEstimate}` +
+          ` 图像余量=${estimate.imageMarginTokens} 来源=${estimate.imageEstimateSource}` +
+          ` 输出=${outputBudgetForLog} 窗口=${contextWindow}]`;
+        logReq(ctx.req, 100, ctx.started, ctx.size, budgetDetails, payload.model);
+      }
+      if (!fit.ok) {
+        logReq(ctx.req, 413, ctx.started, ctx.size, fit.message, payload.model);
+        return ctx.sendError(413, fit.message);
+      }
+      const budgetNote = config.debugBudget && fit.note ? ` 输出预算 ${payload.max_tokens}` : '';
+      const budgetHint = {
+        ...estimate, promptTokens, contextWindow,
+        tokenBudget: typeof payload.max_tokens === 'number' ? payload.max_tokens : 0,
+      };
       const attempt = a => clientWantsStream
         ? streamPassthrough(ctx, payload, a, extraHeaders, budgetNote, ac, budgetHint)
         : aggregateResponse(ctx, payload, a, extraHeaders, budgetNote, ac, budgetHint);
