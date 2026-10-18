@@ -32,6 +32,7 @@
 
 'use strict';
 
+const { randomUUID } = require('crypto');
 const { SseParser } = require('./stream-parser');
 
 // 限量读:错误页/直答异常膨胀时及时放弃,不无限缓冲(超限抛 UPSTREAM_BODY_LIMIT)
@@ -145,7 +146,13 @@ function createUpstreamClient(config) {
         // 回传给签发它的 origin)
         if (cookie && tunnelMode) reqHeaders.Cookie = cookie;
 
-        const outgoingPayload = stripInternalFields(payload);
+        let outgoingPayload = stripInternalFields(payload);
+        // Qwen 曾在复用前缀缓存时输出多语言乱码，固定盐重用也会复发。
+        // 每次实际发送都换盐（含凭据重试），仅改发送副本；保留此防护，
+        // 直到长对话与开启思考的对照验证足以支持移除。
+        if (outgoingPayload?.model === 'qwen3.8-27b') {
+          outgoingPayload = { ...outgoingPayload, cache_salt: randomUUID() };
+        }
         const up = await fetch(upstream, {
           method: 'POST',
           headers: reqHeaders,

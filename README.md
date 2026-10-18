@@ -183,6 +183,7 @@ PROXY_PORT=8081 npm start
 
 - **请求参数**。`max_completion_tokens` 转为 `max_tokens`；开启思考时，低于 512 的输出预算提升到 512。仅保留单个候选回复，不传递 `logprobs` / `top_logprobs`。
 - **思考字段**。原生 `chat_template_kwargs` 优先于顶层思考参数。Qwen 的 `reasoning` 统一为 `reasoning_content`。
+- **Qwen 缓存隔离**。为规避此前更换缓存盐可恢复的多语言乱码，`qwen3.8-27b` 每次上游请求使用新的 `cache_salt`，包括凭据重试；客户端提供的盐值也会替换。这可能增加首字等待时间，其他模型的盐值仍原样转发。
 - **响应交付**。上游统一使用 SSE，非流式客户端由代理聚合。流式普通文字和思考直接转发；原生工具调用在上游正常结束、参数校验通过后交付，期间混合的正文可能暂存。合法调用若标记为 `stop`，修正为 `tool_calls`，其他结束原因保留。
 - **错误处理**。上游明确报告的上下文超限返回 400 和 `context_length_exceeded`。上游断流或工具参数无效时不交付调用；已开始发送 SSE 后通过中断流反映错误，不补发 `[DONE]`。
 
