@@ -112,7 +112,7 @@ DeepSeek 现在直接报告图片计数，因此下表不再需要用总输入�
 | 模型 | 响应 `model` | 纯文本请求 | 含图请求 |
 |---|---|---|---|
 | `DeepSeek-V4.1-Flash` | `deepseek-v4.1-flash-1017` | 未命中缓存时 `prompt_tokens_details: null`；命中相同前缀时出现 `cached_tokens` | 出现 `image_tokens`，同时可能有 `cached_tokens` |
-| `qwen3.8-27b` | `qwen3.8` | 只返回 `prompt_tokens`，无 `prompt_tokens_details` | 仍只返回 `prompt_tokens`，没有独立图片字段 |
+| `qwen3.8-27b` | `qwen3.8` | 输入用量只返回 `prompt_tokens`，无 `prompt_tokens_details` | 仍只返回 `prompt_tokens`，没有独立图片字段 |
 | `DeepSeek-R1-W8A8` | `/data/DeepSeek-R1-W8A8` | `prompt_tokens_details: null` | `/v1/models` 标为不支持视觉 |
 
 因此上游用量字段可以校验 DeepSeek 的图片公式，但不能替代请求前的本地估算。图片用量要在请求被接受并处理后才随响应返回，Qwen 没有独立图片字段，缓存命中也会随前缀和路由变化；代理仍需在发送前估算图片、预留余量并调整 `max_tokens`。
