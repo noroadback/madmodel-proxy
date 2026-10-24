@@ -11,7 +11,9 @@
 //   {type:'timeout', phase:'headers'|'idle'|'total'}
 //   {type:'aborted'}                            外部 signal 中止(客户端断开/聚合超时)
 //   {type:'protocol-error', reason:'truncated'|'invalid', message}
-//   {type:'network-error', cause}               fetch/读取层网络错误
+//   {type:'network-error', cause, phase, codes, requestBytes, receivedBytes, responseStatus}
+//                                               请求/读取/交付层错误；不携带原始 cause
+// requestBytes 是序列化后的请求体大小，不表示已上传字节数。
 //
 // truncated 结果额外带 idleMs(距上一帧收到的时长;从未收到字节时即整个请求
 // 已等待时长)与 sawBytes(是否收到过任何字节),错误文案据此区分"首帧都没等到"
@@ -20,7 +22,9 @@
 // idle 守卫的口径:按"上游产出字节"计时,下游交付(onChunk,含背压等待)期间
 // 挂起——客户端停读造成的静默不是上游挂死。交付完成后重新计时。
 //
-// onChunk(obj) 收每个 SSE data JSON,可为 async(背压等待期间不再读上游);
+// onChunk(obj, {receivedAt}) 收每个 SSE data JSON，receivedAt 是网络块的
+// 单调读取时间；同块所有事件共享该值，不把逐事件交付耗时当成生成间隔。
+// 可为 async(背压等待期间不再读上游);
 // onOpen(isSse) 在上游响应头到达时调用一次。
 //
 // === 异常契约(调用方依赖) ===
@@ -33,6 +37,7 @@
 'use strict';
 
 const { randomUUID } = require('crypto');
+const { performance } = require('node:perf_hooks');
 const { SseParser } = require('./stream-parser');
 
 // 限量读:错误页/直答异常膨胀时及时放弃,不无限缓冲(超限抛 UPSTREAM_BODY_LIMIT)
@@ -42,7 +47,7 @@ async function readLimited(reader, limit, onProgress) {
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    if (value.length && onProgress) onProgress();
+    if (value.length && onProgress) onProgress(value.length);
     total += value.length;
     if (total > limit) {
       // 已结束的 reader 再次 cancel 属重复取消,是该忽略的清理错误
@@ -67,6 +72,21 @@ function stripInternalFields(payload) {
     }
   }
   return out || payload;
+}
+
+// 只保留错误类型和有限的错误码，不把 cause 中的 URL、凭据或任意错误消息写入日志。
+function networkErrorCodes(error) {
+  const pending = [error], seen = new Set(), codes = new Set();
+  for (let n = 0; pending.length && n < 16; n++) {
+    const item = pending.shift();
+    if (!item || typeof item !== 'object' || seen.has(item)) continue;
+    seen.add(item);
+    if (typeof item.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(item.code)) codes.add(item.code);
+    if (item.cause) pending.push(item.cause);
+    if (Array.isArray(item.errors)) pending.push(...item.errors.slice(0, 8));
+    if (codes.size >= 8) break;
+  }
+  return [...codes];
 }
 
 function createUpstreamClient(config) {
@@ -96,6 +116,14 @@ function createUpstreamClient(config) {
       let headerTimer = null;
       let reader = null;
       let upBody = null; // JSON 应答路径在 reader 建立前保留 body 以便取消
+      let phase = 'request', requestBytes = 0, receivedBytes = 0, responseStatus = null;
+      const networkError = (error, message) => {
+        const known = /^(fetch failed|terminated|network error)$/i.test(error?.message || '')
+          ? error.message : (/^[A-Za-z][A-Za-z0-9]{0,31}$/.test(error?.name || '') ? error.name : '网络异常');
+        return { type: 'network-error', cause: message || known, phase,
+          requestBytes, receivedBytes, responseStatus, codes: networkErrorCodes(error) };
+      };
+      const received = bytes => { receivedBytes += bytes; armIdle(); };
 
       const finish = (v) => {
         if (settled) return;
@@ -153,15 +181,19 @@ function createUpstreamClient(config) {
         if (outgoingPayload?.model === 'qwen3.8-27b') {
           outgoingPayload = { ...outgoingPayload, cache_salt: randomUUID() };
         }
+        const requestBody = Buffer.from(JSON.stringify(outgoingPayload), 'utf8');
+        requestBytes = requestBody.length;
         const up = await fetch(upstream, {
           method: 'POST',
           headers: reqHeaders,
-          body: Buffer.from(JSON.stringify(outgoingPayload), 'utf8'),
+          body: requestBody,
           redirect: 'manual',
           signal: lifecycle.signal,
         });
         clearTimeout(headerTimer);
         upBody = up.body;
+        phase = 'response-body';
+        responseStatus = up.status;
         // 所有响应体均受总时限约束，含持续发字节的错误响应。
         totalTimer = setTimeout(() => {
           cancelBody();
@@ -177,10 +209,10 @@ function createUpstreamClient(config) {
           let text;
           try {
             reader = up.body.getReader();
-            text = (await readLimited(reader, upstreamJsonBodyLimit, armIdle)).toString('utf8');
+            text = (await readLimited(reader, upstreamJsonBodyLimit, received)).toString('utf8');
           } catch (e) {
             cancelBody();
-            return finish({ type: 'network-error', cause: `上游错误响应读取失败: ${String(e?.message || e)}` });
+            return finish(networkError(e, '上游错误响应读取失败'));
           }
           if (settled) return;
           let obj = null;
@@ -202,18 +234,27 @@ function createUpstreamClient(config) {
           // 极少数是完整 completion,同样带回由调用方处理,不丢弃)。
           // JSON body 同样可能挂死(头部到达后不再发字节),空闲超时一并覆盖。
           armIdle();
-          let text;
+          let bytes;
           try {
             reader = up.body.getReader();
-            text = (await readLimited(reader, upstreamJsonBodyLimit, armIdle)).toString('utf8');
+            bytes = await readLimited(reader, upstreamJsonBodyLimit, received);
           } catch (e) {
             cancelBody();
             if (e?.code === 'UPSTREAM_BODY_LIMIT') {
-              return finish({ type: 'network-error', cause: `上游 JSON 响应超过 ${upstreamJsonBodyLimit / 1048576}MB 上限` });
+              return finish(networkError(e, `上游 JSON 响应超过 ${upstreamJsonBodyLimit / 1048576}MB 上限`));
             }
-            return finish({ type: 'network-error', cause: `上游 JSON 响应读取失败: ${String(e?.message || e)}` });
+            return finish(networkError(e, '上游 JSON 响应读取失败'));
           }
           if (settled) return; // 等待读取期间超时/取消已收尾
+          let text;
+          try {
+            // 200 JSON 也可能携带原生工具调用，不能把损坏字节替换后交付。
+            text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+          } catch {
+            cancelBody();
+            return finish({ type: 'protocol-error', reason: 'invalid',
+              message: '上游 JSON 响应含非法 UTF-8，已停止交付，避免替换字符改变正文或工具参数' });
+          }
           let obj = null;
           try { obj = JSON.parse(text); } catch (e) { /* 非 JSON 错误页:按 body=null 带回原文 */ }
           if (obj?.choices) return finish({ type: 'completion', body: obj });
@@ -233,36 +274,33 @@ function createUpstreamClient(config) {
         armIdle();
         for (;;) {
           const { done, value } = await reader.read();
+          const receivedAt = performance.now();
           if (settled) return;
           if (done) break;
           sawBytes = true;
+          receivedBytes += value.length;
           lastBytesAt = Date.now();
           armIdle();
           total += value.length;
           if (total > upstreamSseTotalLimit) {
             cancelBody();
-            return finish({ type: 'network-error', cause: `上游响应超过 ${upstreamSseTotalLimit / 1048576}MB 上限` });
+            return finish(networkError({ code: 'UPSTREAM_BODY_LIMIT' }, `上游响应超过 ${upstreamSseTotalLimit / 1048576}MB 上限`));
           }
           for (const event of parser.push(value)) {
             if (event.type === 'done') {
               // [DONE] 即终止:立即取消 reader,不等上游关闭连接
               cancelBody();
-              return finish({ type: 'stream', usage });
+              return finish({ type: 'stream', usage, completedAt: receivedAt });
             }
             if (event.type === 'invalid') {
               cancelBody();
               return finish({ type: 'protocol-error', reason: 'invalid', message: event.message });
             }
             const obj = event.value;
-            // 错误帧(200-SSE 内嵌形态):学校方言 errorMessage 与 OpenAI 标准
-            // error 对象都识别(1.8.1 前只认前者,标准形态被当正常 chunk 送进
-            // 聚合器,产出 200 + content:null 的假成功)。带 choices 属性的帧
-            // 即使另带错误字段也照常透传——以正常内容为准;注意 choices:[] 的
-            // usage 帧同样必须放行(空数组为 truthy,判据是属性存在而非长度),
-            // 若上游以 {error, choices:[]} 同帧返回则按内容处理(残余缝隙,
-            // 实测未见此形态)
-            if (obj && typeof obj === 'object' && !obj.choices &&
-                (obj.errorMessage !== undefined || (obj.error && typeof obj.error === 'object'))) {
+            // 显式错误优先于 choices/usage，不能让混合错误帧冲刷成功收尾。
+            // event:error 的 data 可直接是裸错误对象，不要求再包一层 error。
+            if (event.type === 'error' || (obj && typeof obj === 'object' &&
+                (obj.errorMessage !== undefined || obj.error !== undefined))) {
               cancelBody();
               return finish({ type: 'upstream-error', status: up.status, body: obj, raw: JSON.stringify(obj).slice(0, 500), retryAfter: up.headers.get('retry-after') });
             }
@@ -275,14 +313,15 @@ function createUpstreamClient(config) {
               // 记成上游空闲(2026-09-16 复现)。交付完成后按"现在"重新计时;
               // 客户端永久停读仍有 streamTotalTimeout 兜底,不会无限挂住
               clearTimeout(idleTimer);
-              try { await onChunk(obj); }
+              try { phase = 'delivery'; await onChunk(obj, { receivedAt }); }
               catch (e) {
                 cancelBody();
-                if (e?.code === 'UPSTREAM_TOOL_INDEX') {
+                if (e?.code === 'UPSTREAM_TOOL_INDEX' || e?.code === 'UPSTREAM_TOOL_CALL') {
                   return finish({ type: 'protocol-error', reason: 'invalid', message: e.message });
                 }
-                return finish({ type: 'network-error', cause: `下游写失败(客户端已断开): ${String(e?.message || e)}` });
+                return finish(networkError(e));
               }
+              phase = 'response-body';
               if (settled) return;
               // 背压等待不计入 idleMs:lastBytesAt 只在读上游时更新,若不
               // 刷新,下游停读 N 秒后截断时文案里的"距上一帧"会虚高 N 秒
@@ -304,7 +343,9 @@ function createUpstreamClient(config) {
       })().catch((e) => {
         // 唯一的主错误通道:外部取消优先,其余按网络错误带回 cause
         if (signal?.aborted) return finish({ type: 'aborted' });
-        finish({ type: 'network-error', cause: String(e?.message || e) });
+        cancelBody();
+        lifecycle.abort();
+        finish(networkError(e));
       });
     });
   }

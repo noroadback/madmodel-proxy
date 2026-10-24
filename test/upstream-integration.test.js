@@ -15,6 +15,7 @@ const os = require('os');
 const path = require('path');
 const net = require('net');
 const http = require('http');
+const { listenTestHttp } = require('../scripts/listen-test-http');
 
 const STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-it-'));
 process.env.MADMODEL_STATE_DIR = STATE_DIR;
@@ -35,30 +36,22 @@ const test = require('node:test');
 const assert = require('node:assert');
 
 // ---- mock 上游(可编程响应) ----
-function startMockUpstream() {
+async function startMockUpstream() {
   let handler = null;
   const server = http.createServer((req, res) => {
     if (handler) return handler(req, res);
     res.writeHead(500, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: { message: 'mock 未配置 handler' } }));
   });
-  return new Promise(resolve => {
-    server.listen(0, '127.0.0.1', () => resolve({
-      server,
-      port: server.address().port,
-      set: h => { handler = h; },
-    }));
-  });
+  const port = await listenTestHttp(server);
+  return { server, port, set: h => { handler = h; } };
 }
 
-function freePort() {
-  return new Promise(resolve => {
-    const srv = net.createServer();
-    srv.listen(0, '127.0.0.1', () => {
-      const { port } = srv.address();
-      srv.close(() => resolve(port));
-    });
-  });
+async function freePort() {
+  const srv = net.createServer();
+  const port = await listenTestHttp(srv);
+  await new Promise(resolve => srv.close(resolve));
+  return port;
 }
 
 // mock 上游的 SSE 应答助手
@@ -111,7 +104,7 @@ test('上游错误判定集成矩阵(mock 上游 + 完整代理实例)', async t
   };
 
   try {
-    await t.test('流式与非流式的完成日志显示首字等待和均速', async () => {
+    await t.test('流式和非流式聚合均显示上游观察到的输出阶段速度', async () => {
       const lines = [];
       const originalLog = console.log;
       console.log = (...args) => lines.push(args.join(' '));
@@ -121,8 +114,11 @@ test('上游错误判定集成矩阵(mock 上游 + 完整代理实例)', async t
             res.writeHead(200, { 'content-type': 'text/event-stream' });
             res.write(`data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant' } }] })}\n\n`);
             setTimeout(() => {
-              res.end(`data: ${JSON.stringify(CH)}\n\ndata: ${JSON.stringify(USAGE)}\n\ndata: [DONE]\n\n`);
+              res.write(`data: ${JSON.stringify(CH)}\n\n`);
             }, 20);
+            setTimeout(() => {
+              res.end(`data: ${JSON.stringify(CH)}\n\ndata: ${JSON.stringify(USAGE)}\n\ndata: [DONE]\n\n`);
+            }, 220);
           });
           assert.strictEqual((await chat(stream)).status, 200);
         }
@@ -131,8 +127,68 @@ test('上游错误判定集成矩阵(mock 上游 + 完整代理实例)', async t
       assert.strictEqual(completed.length, 2);
       for (const line of completed) {
         assert.match(line, /首字 \d+\.\ds/);
-        assert.match(line, /均速 \d+\.\d tok\/s/);
+        assert.doesNotMatch(line, /均速/);
       }
+      assert.match(completed[0], /输出 \d+\.\d tok\/s/);
+      assert.match(completed[1], /输出 \d+\.\d tok\/s/);
+    });
+
+    await t.test('单帧内容到终止帧有正间隔就显示速度', async () => {
+      const lines = [];
+      const originalLog = console.log;
+      console.log = (...args) => lines.push(args.join(' '));
+      try {
+        mock.set((_req, res) => {
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          res.write(`data: ${JSON.stringify(CH)}\n\n`);
+          setTimeout(() => res.end(`data: ${JSON.stringify(USAGE)}\n\ndata: [DONE]\n\n`), 150);
+        });
+        assert.strictEqual((await chat(true)).status, 200);
+      } finally { console.log = originalLog; }
+      assert.match(lines.find(line => line.includes('token 1/1')), /首字 \d+\.\ds · 输出 \d+\.\d tok\/s/);
+    });
+
+    await t.test('上游JSON回退不伪造首字或输出速度', async () => {
+      const lines = [];
+      const originalLog = console.log;
+      console.log = (...args) => lines.push(args.join(' '));
+      try {
+        mock.set((_req, res) => {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' },
+            finish_reason: 'stop' }], usage: USAGE.usage }));
+        });
+        for (const stream of [true, false]) assert.strictEqual((await chat(stream)).status, 200);
+      } finally { console.log = originalLog; }
+      const completed = lines.filter(line => line.includes('token 1/1'));
+      assert.strictEqual(completed.length, 2);
+      for (const line of completed) assert.match(line, /首字 — · 输出 —/);
+    });
+
+    await t.test('首字从HTTP入口计时，慢速上传不会被统计起点漏掉', async () => {
+      const lines = [];
+      const originalLog = console.log;
+      console.log = (...args) => lines.push(args.join(' '));
+      try {
+        mock.set((_req, res) => sse(res, [JSON.stringify(CH), JSON.stringify(USAGE)]));
+        const body = Buffer.from(JSON.stringify({ model: 'DeepSeek-V4.1-Flash',
+          messages: [{ role: 'user', content: 'ok' }], max_tokens: 512, stream: true }));
+        await new Promise((resolve, reject) => {
+          const req = http.request(proxyUrl, { method: 'POST', headers: {
+            'content-type': 'application/json', 'content-length': body.length,
+          } }, res => {
+            assert.strictEqual(res.statusCode, 200);
+            res.resume();
+            res.on('end', resolve);
+            res.on('error', reject);
+          });
+          req.on('error', reject);
+          req.write(body.subarray(0, 1));
+          setTimeout(() => req.end(body.subarray(1)), 220);
+        });
+      } finally { console.log = originalLog; }
+      const firstSeconds = /首字 (\d+\.\d)s/.exec(lines.find(line => line.includes('token 1/1')))?.[1];
+      assert.ok(Number(firstSeconds) >= 0.2, '首字等待必须包含请求体上传时间');
     });
 
     await t.test('双思考字段经工具流缓冲与非流式交付后均不重复', async () => {

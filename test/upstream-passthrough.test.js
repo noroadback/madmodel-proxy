@@ -5,6 +5,9 @@ require('../scripts/isolated-env').isolate();
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
+const { listenTestHttp } = require('../scripts/listen-test-http');
+const { performance } = require('node:perf_hooks');
+const { ReadableStream } = require('node:stream/web');
 const baseConfig = require('../config');
 const { createUpstreamClient } = require('../core/upstream-client');
 const { createProxyService } = require('../core/proxy-service');
@@ -42,7 +45,7 @@ async function localUpstream(t, handler) {
     else respond(res, payload.stream);
   });
   t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  await listenTestHttp(server);
   const config = {
     ...baseConfig,
     upstream: `http://127.0.0.1:${server.address().port}/v1/chat/completions`,
@@ -195,4 +198,68 @@ test('WebVPN 会话失效后用真实上游客户端重试，每次 HTTP 发送�
       assert.deepEqual(JSON.parse(ctx.rawBody.toString('utf8')), payload, '原始客户端请求不被改写');
     });
   }
+});
+
+test('上游计时：同一读取块的多个有效帧与 DONE 共用到达时间，排除下游等待', async t => {
+  const frames = [
+    { choices: [{ delta: { reasoning_content: '先思考' } }] },
+    { choices: [{ delta: { content: '正文' } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{}' } }] } }] },
+  ];
+  const block = frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join('') + 'data: [DONE]\n\n';
+  const body = new ReadableStream({ start(controller) {
+    controller.enqueue(Buffer.from(block));
+    controller.close();
+  } });
+  t.mock.method(globalThis, 'fetch', async () => new Response(body, {
+    status: 200, headers: { 'content-type': 'text/event-stream' },
+  }));
+  const observed = [];
+  const upstream = createUpstreamClient({ ...baseConfig, tunnelMode: false });
+  const result = await upstream.request({
+    payload: { model: 'DeepSeek-V4.1-Flash', stream: true, messages: [] }, token: 'mock-token',
+    onChunk: async (value, metadata) => {
+      observed.push({ value, metadata, callbackAt: performance.now() });
+      if (observed.length === 1) await new Promise(resolve => setTimeout(resolve, 150));
+    },
+  });
+  const returnedAt = performance.now();
+  assert.equal(result.type, 'stream');
+  assert.deepEqual(observed.map(item => item.value), frames);
+  assert.ok(Number.isFinite(observed[0].metadata?.receivedAt));
+  assert.ok(observed[1].callbackAt - observed[0].callbackAt > 100, '夹具必须产生超过 100ms 的下游等待');
+  assert.deepEqual(observed.map(item => item.metadata.receivedAt),
+    Array(frames.length).fill(observed[0].metadata.receivedAt), '同一读取块不能被回调等待伪造成分时输出');
+  assert.equal(result.completedAt, observed[0].metadata.receivedAt, 'DONE 应使用所在读取块的到达时间');
+  assert.ok(returnedAt - result.completedAt > 100, '上游完成时间不能被下游等待推迟到请求返回时');
+});
+
+test('上游计时：受控分时读取的下一块推进到达时间，DONE 取最后一块时间', async t => {
+  const frames = [
+    { choices: [{ delta: { content: '第一段' } }] },
+    { choices: [{ delta: { content: '第二段' } }] },
+  ];
+  const body = new ReadableStream({
+    start(controller) { controller.enqueue(Buffer.from(`data: ${JSON.stringify(frames[0])}\n\n`)); },
+    async pull(controller) {
+      await new Promise(resolve => setTimeout(resolve, 150));
+      controller.enqueue(Buffer.from(`data: ${JSON.stringify(frames[1])}\n\ndata: [DONE]\n\n`));
+      controller.close();
+    },
+  }, { highWaterMark: 0 });
+  t.mock.method(globalThis, 'fetch', async () => new Response(body, {
+    status: 200, headers: { 'content-type': 'text/event-stream' },
+  }));
+  const observed = [];
+  const upstream = createUpstreamClient({ ...baseConfig, tunnelMode: false });
+  const result = await upstream.request({
+    payload: { model: 'DeepSeek-V4.1-Flash', stream: true, messages: [] }, token: 'mock-token',
+    onChunk: (value, metadata) => { observed.push({ value, metadata }); },
+  });
+  assert.equal(result.type, 'stream');
+  assert.deepEqual(observed.map(item => item.value), frames);
+  for (const item of observed) assert.ok(Number.isFinite(item.metadata?.receivedAt));
+  assert.ok(observed[1].metadata.receivedAt - observed[0].metadata.receivedAt > 100,
+    '独立读取且分时到达的块应保留真实观测跨度');
+  assert.equal(result.completedAt, observed[1].metadata.receivedAt);
 });

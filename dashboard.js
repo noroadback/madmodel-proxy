@@ -15,6 +15,7 @@ const path = require('path');
 const readline = require('readline');
 const { checkForUpdate } = require('./core/update-check');
 const { classifyChildExit } = require('./core/child-supervision');
+const { childColorEnv } = require('./core/log-color');
 const { TOKEN_FILE } = require('./platform/paths');
 const {
   decide, readChoice, writeChoice, choiceFile, CAMPUS_UPSTREAM, MODE_CAMPUS, MODE_OFFCAMPUS,
@@ -66,6 +67,7 @@ function launch(tag, script, args) {
   try {
     child = spawn(process.execPath, [path.join(__dirname, script), ...args], {
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: childColorEnv(),
     });
   } catch (e) {
     console.log(`[${tag}] 启动失败: ${e.message}`);

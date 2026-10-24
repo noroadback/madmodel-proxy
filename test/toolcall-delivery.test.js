@@ -1,4 +1,4 @@
-// 原生工具调用交付：完整性校验、SSE/JSON 适配、结束原因与思考透传。
+// 完整缓冲模式的工具交付：完整性校验、SSE/JSON 适配、结束原因与思考透传。
 'use strict';
 require('../scripts/isolated-env').isolate();
 
@@ -15,6 +15,7 @@ const TOKEN_FILE = path.join(STATE_DIR, 'token.json');
 fs.writeFileSync(TOKEN_FILE, JSON.stringify({ token: 'tcfix-token', expiresAt: Date.now() + 3600e3 }));
 process.env.PROXY_TOKEN_FILE = TOKEN_FILE;
 process.env.MADMODEL_FORCE_TUNNEL_MODE = '1';
+process.env.PROXY_TOOL_STREAM = 'buffered';
 
 const test = require('node:test');
 const assert = require('node:assert');

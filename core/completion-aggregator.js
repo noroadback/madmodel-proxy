@@ -11,7 +11,9 @@ function createAggregator(model = '', thinkingField = null) {
     id: '', model,
     content: '', reasoning: '',
     toolCalls: Object.create(null), // index → {id, type, function:{name, arguments}}
+    argumentFragments: Object.create(null),
     invalidToolCalls: false,
+    invalidToolReason: null,
     finish: null, usage: null, created: 0,
     feed(obj) {
       if (obj.id) this.id = obj.id;
@@ -28,6 +30,7 @@ function createAggregator(model = '', thinkingField = null) {
       // 回复里就永远没有思考。交付名统一为 `reasoning_content`(下方 result)
       const r = readReasoningDelta(d, thinkingField);
       if (r !== null) this.reasoning += r;
+      if (d.tool_calls != null && !Array.isArray(d.tool_calls)) this.invalidToolCalls = true;
       if (Array.isArray(d.tool_calls)) {
         for (const tc of d.tool_calls) {
           if (!tc || typeof tc !== 'object' || Array.isArray(tc)) {
@@ -52,10 +55,18 @@ function createAggregator(model = '', thinkingField = null) {
             continue;
           }
           if (!this.toolCalls[i]) this.toolCalls[i] = { id: '', type: 'function', function: { name: '', arguments: '' } };
+          if (tc.id && this.toolCalls[i].id && tc.id !== this.toolCalls[i].id) {
+            this.invalidToolCalls = true;
+            this.invalidToolReason ??= '同一工具索引的调用 ID 发生变化';
+            continue;
+          }
           if (tc.id) this.toolCalls[i].id = tc.id;
           if (tc.function) {
             if (tc.function.name) this.toolCalls[i].function.name += tc.function.name;
-            if (tc.function.arguments) this.toolCalls[i].function.arguments += tc.function.arguments;
+            if (typeof tc.function.arguments === 'string') {
+              this.toolCalls[i].function.arguments += tc.function.arguments;
+              this.argumentFragments[i] = (this.argumentFragments[i] || 0) + 1;
+            }
           }
         }
       }

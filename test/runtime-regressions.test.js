@@ -59,7 +59,10 @@ async function run(body, responses, overrides = {}) {
       assert.ok(next, '不得发生未预期的重试');
       if (next.type === 'stream') {
         const ch = next.body.choices[0];
-        await args.onChunk({ choices: [{ index: 0, delta: ch.message, finish_reason: ch.finish_reason }] });
+        const delta = { ...ch.message, ...(ch.message.tool_calls ? {
+          tool_calls: ch.message.tool_calls.map((call, index) => ({ ...call, index })),
+        } : {}) };
+        await args.onChunk({ choices: [{ index: 0, delta, finish_reason: ch.finish_reason }] });
         if (next.body.usage) await args.onChunk({ choices: [], usage: next.body.usage });
         return { type: 'stream', usage: next.body.usage };
       }

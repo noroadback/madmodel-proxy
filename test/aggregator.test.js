@@ -113,3 +113,14 @@ test('聚合: 上游 chunk 的 model 优先于构造默认', () => {
   const out = quiet.result();
   assert.strictEqual(out.model, 'default-m');
 });
+
+test('聚合: 同一 index 更换 ID 时拒绝串接两个调用', () => {
+  const agg = createAggregator('M');
+  agg.feed(delta({ tool_calls: [{ index: 0, id: 'call_a', function: { name: 'run', arguments: '{"value":' } }] }));
+  agg.feed(delta({ tool_calls: [{ index: 0, id: 'call_b', function: { arguments: '1}' } }] }));
+  assert.strictEqual(agg.invalidToolCalls, true);
+  assert.match(agg.invalidToolReason, /ID/);
+  const call = agg.result().choices[0].message.tool_calls[0];
+  assert.strictEqual(call.id, 'call_a');
+  assert.strictEqual(call.function.arguments, '{"value":');
+});

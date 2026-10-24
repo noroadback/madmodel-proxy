@@ -45,6 +45,30 @@ test('解析: 行在 chunk 边界切开仍拼成完整帧', () => {
   assert.deepStrictEqual(p.push('4}\n'), [{ type: 'data', value: { a: 4 } }]);
 });
 
+test('解析: event:error 裸错误跨 chunk 保留，空行后恢复普通事件', () => {
+  const p = new SseParser(1024);
+  assert.deepStrictEqual(p.push('event: er'), []);
+  assert.deepStrictEqual(p.push('ror\r\ndata: {"message":"failed"}\r\n\r\ndata: {"ok":1}\n\n'), [
+    { type: 'error', value: { message: 'failed' } },
+    { type: 'data', value: { ok: 1 } },
+  ]);
+});
+
+test('解析: error 事件不能用 DONE 伪装成功', () => {
+  const p = new SseParser(1024);
+  assert.strictEqual(p.push('event: error\ndata: [DONE]\n\n')[0].type, 'error');
+});
+
+test('解析: data 后面的 event:error 跨 chunk 仍阻止成功收尾', () => {
+  const p = new SseParser(1024);
+  assert.deepStrictEqual(p.push('data: {"message":"failed"}\n'), [
+    { type: 'data', value: { message: 'failed' } },
+  ]);
+  assert.deepStrictEqual(p.push('event: error\n\n'), [
+    { type: 'error', value: { message: 'failed' } },
+  ]);
+});
+
 test('解析: 多字节 UTF-8 字符跨 chunk 切开正确拼帧(TextDecoder 流模式)', () => {
   const p = new SseParser(1024);
   const full = Buffer.from('data: {"t":"你好世界"}\n', 'utf8');
@@ -81,4 +105,28 @@ test('解析: 一次 push 多帧按序产出', () => {
     { type: 'data', value: { n: 2 } },
     { type: 'done' },
   ]);
+});
+
+test('解析: 非法 UTF-8 明确失败，不把替换字符交付成合法工具参数', () => {
+  const parser = new SseParser(1024);
+  const wire = Buffer.concat([Buffer.from('data: {"arguments":"'), Buffer.from([0xff]), Buffer.from('"}\n\n')]);
+  const events = parser.push(wire);
+  assert.strictEqual(events.length, 1);
+  assert.strictEqual(events[0].type, 'invalid');
+  assert.match(events[0].message, /UTF-8/);
+  assert.deepStrictEqual(parser.push('data: [DONE]\n\n'), []);
+});
+
+test('解析: 已带换行的大帧也受单行上限约束', () => {
+  const parser = new SseParser(64);
+  const events = parser.push(`data: ${JSON.stringify({ value: 'x'.repeat(100) })}\n\ndata: [DONE]\n\n`);
+  assert.strictEqual(events.length, 1);
+  assert.strictEqual(events[0].type, 'invalid');
+  assert.match(events[0].message, /单行超过/);
+});
+
+test('解析: 坏帧日志不包含上游参数原文', () => {
+  const events = new SseParser(1024).push('data: {"private-command":"secret-value" broken}\n\n');
+  assert.strictEqual(events[0].type, 'invalid');
+  assert.ok(!events[0].message.includes('secret-value'));
 });

@@ -11,6 +11,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { performance } = require('node:perf_hooks');
 const { validateListenConfig } = require('../core/listen-config');
 const { jwtExpiresAt } = require('../madmodel-auth');
 const credentials = require('../platform/credentials');
@@ -32,6 +33,13 @@ function openAiError(res, status, message, type, extraHeaders, code) {
   sendJson(res, status, {
     error: { message, type: type || 'proxy_error', code: code ?? status },
   }, extraHeaders);
+}
+
+function endSseError(res, message, type = 'proxy_error', code = 502) {
+  if (res.destroyed || res.writableEnded) return;
+  // 错误是终态，不等待 drain，避免慢读客户端令失败请求一直占用槽位。
+  // OpenAI SDK 同时识别 event:error 和 data.error；绝不能随后补发 [DONE]。
+  res.end(`event: error\ndata: ${JSON.stringify({ error: { message, type, code } })}\n\n`);
 }
 
 // Authorization 存在时不回退，避免两个头的含义冲突。
@@ -246,6 +254,7 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
 
   const server = http.createServer((req, res) => {
     const started = Date.now();
+    const startedMonotonic = performance.now();
     const url = (req.url || '').split('?')[0];
 
     // socket 层错误兜底:单条连接的故障不应击穿整个进程
@@ -368,7 +377,7 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
       reservedBytes += additional;
     };
     readChatBody(req, config, reserve).then(
-      ({ rawBody, size }) => handleChat(req, res, rawBody, size, started),
+      ({ rawBody, size }) => handleChat(req, res, rawBody, size, started, startedMonotonic),
       e => handleReadError(req, res, e, started)
     ).catch(e => {
       // 理论上不可达(service 已消解所有已知异常路径),保底防进程崩溃
@@ -376,7 +385,7 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
       if (!res.headersSent) {
         try { openAiError(res, 500, `代理内部错误: ${e?.message || e}`); } catch (e2) { /* 连接已断 */ }
       } else {
-        res.end();
+        endSseError(res, '代理处理流式响应失败，请重试。', 'proxy_error', 500);
       }
     }).finally(() => {
       pendingBodyBytes -= reservedBytes;
@@ -420,7 +429,7 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
   }
 
   // ---- 为 core/proxy-service 构建 ctx:HTTP 细节全部收在这里 ----
-  function handleChat(req, res, rawBody, size, started) {
+  function handleChat(req, res, rawBody, size, started, startedMonotonic) {
     // 上游生命周期:客户端断开/聚合超时都能中止上游,不白烧配额。
     // 服务层与背压等待共用这一个 AbortController
     const ac = new AbortController();
@@ -444,15 +453,26 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
     // 该请求从此没有收尾(日志缺失、连接占住 maxConnections 名额)
     const waitDrain = () => {
       if (clientGone || res.destroyed || res.writableEnded) return Promise.resolve();
-      return new Promise(r => {
-        const done = () => { res.removeListener('drain', done); res.removeListener('close', done); r(); };
+      return new Promise((resolve, reject) => {
+        const cleanup = () => {
+          res.removeListener('drain', done);
+          res.removeListener('close', done);
+          ac.signal.removeEventListener('abort', aborted);
+        };
+        const done = () => { cleanup(); resolve(); };
+        const aborted = () => {
+          cleanup();
+          reject(new Error('流式交付已取消'));
+        };
         res.once('drain', done);
         res.once('close', done);
+        ac.signal.addEventListener('abort', aborted, { once: true });
+        if (ac.signal.aborted) aborted();
       });
     };
 
     const ctx = {
-      req, res, rawBody, size, started,
+      req, res, rawBody, size, started, startedMonotonic,
       abortController: ac,
       clientGone: () => clientGone,
       headersSent: () => res.headersSent,
@@ -490,6 +510,10 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
       },
       endResponse() {
         if (!res.writableEnded) res.end();
+      },
+      sendStreamError(message, type, code) {
+        endSseError(res, message, type, code);
+        ac.abort(); // 解除仍在等待 drain 的写入，并取消尚未收尾的上游。
       },
       // 终态响应面
       sendJson(status, body, headers) { sendJson(res, status, body, headers); },

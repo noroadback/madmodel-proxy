@@ -118,6 +118,8 @@ module.exports = Object.freeze({
   streamIdleTimeout: numberEnv('PROXY_IDLE_MS', 300e3),
   streamTotalTimeout: numberEnv('PROXY_STREAM_TOTAL_MS', 1200e3),
   nonstreamTotalTimeout: numberEnv('PROXY_NONSTREAM_TOTAL_MS', 600e3), // 非流式聚合总超时(实测流式 600s 不断)
+  // 默认实时交付工具参数，完整校验后才发成功收尾；旧客户端可完整缓冲。
+  toolStreamMode: process.env.PROXY_TOOL_STREAM === 'buffered' ? 'buffered' : 'incremental',
   upstreamJsonBodyLimit: 5 * 1024 * 1024,   // JSON 错误页/直答体上限
   upstreamSseTotalLimit: 64 * 1024 * 1024,  // 单次流总字节上限
   sseLineLimit: 1024 * 1024,       // 尾部未完成行的字节上限(防病态流内存膨胀)
