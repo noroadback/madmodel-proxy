@@ -8,12 +8,26 @@ const { estimateVisionBudget } = require('./vision-budget');
 const UPSTREAM_REJECTED = ['logprobs', 'top_logprobs'];
 
 // JSON 解析与形态校验:非 JSON / 非对象(null/数组/标量)按 400 挡在业务之前。
-// 错误带 code(INVALID_JSON / INVALID_PAYLOAD)与面向用户的消息。
+// 错误带 code(INVALID_UTF8 / INVALID_JSON / INVALID_PAYLOAD)与面向用户的消息。
 function parseJsonBody(rawBody) {
+  let text;
+  try {
+    // 对话和工具历史必须字节完整；不能把损坏字节替换后当作新内容转发。
+    // 保留 BOM 交给 JSON.parse 判定，维持原有 JSON 入口的处理方式。
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(rawBody);
+  } catch {
+    const err = new Error('请求体含非法 UTF-8，请检查客户端编码后重试。');
+    err.code = 'INVALID_UTF8';
+    throw err;
+  }
   let payload;
-  try { payload = JSON.parse(rawBody.toString('utf8')); }
+  try { payload = JSON.parse(text); }
   catch (e) {
-    const err = new Error(`请求体不是合法 JSON: ${e.message}`);
+    // V8 的解析异常可能回显整段请求正文；只保留固定类别和数值位置。
+    const reason = /Unterminated string/i.test(e.message) ? '字符串未闭合'
+      : /Unexpected end/i.test(e.message) ? '内容未完成' : '语法无效';
+    const position = /position (\d+)(?: \(line \d+ column \d+\))?$/.exec(e.message)?.[1];
+    const err = new Error(`请求体不是合法 JSON: ${reason}${position ? `（位置 ${position}）` : ''}`);
     err.code = 'INVALID_JSON';
     throw err;
   }

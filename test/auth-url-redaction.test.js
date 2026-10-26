@@ -264,3 +264,26 @@ test('实体分支不贪婪:结构、后续参数、闭合标记均保留', () =
   // 裸值形态的空白排除保持不变(没有闭合标记兜底,放宽会吞后续)
   assert.strictEqual(redactUrl('?ticket=A&x=1'), '?ticket=***&x=1');
 });
+
+test('认证重定向被拒绝或超过跳数时也取消响应体', async t => {
+  for (const scenario of [
+    { name: '校外目标', target: 'https://outside.example/next', limit: 16 },
+    { name: '跳数超限', target: 'https://id.tsinghua.edu.cn/next', limit: 0 },
+    { name: '非法地址', target: 'http://[', limit: 16 },
+  ]) {
+    await t.test(scenario.name, async t => {
+      let cancelled = 0, requests = 0;
+      t.mock.method(globalThis, 'fetch', async () => {
+        requests++;
+        return new Response(new ReadableStream({
+          start(controller) { controller.enqueue(Buffer.from('unused redirect body')); },
+          cancel() { cancelled++; },
+        }), { status: 302, headers: { location: scenario.target } });
+      });
+      await assert.rejects(() => requestWithRedirects(
+        { url: 'https://id.tsinghua.edu.cn/start' }, new CookieJar(), scenario.limit));
+      assert.strictEqual(requests, 1, '失败目标不能被跟随');
+      assert.strictEqual(cancelled, 1, '失败出口必须取消未读取的响应体');
+    });
+  }
+});

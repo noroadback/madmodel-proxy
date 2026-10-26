@@ -8,7 +8,7 @@
 
 在服务端按 [快速开始](../README.md#快速开始) 下载项目并运行 `npm run login`。在项目目录设置监听地址和密钥后启动。
 
-PowerShell
+PowerShell：
 
 ```powershell
 $env:PROXY_BIND_HOST = "0.0.0.0"
@@ -17,7 +17,7 @@ $env:PROXY_API_KEYS
 npm start
 ```
 
-macOS / Linux
+macOS / Linux：
 
 ```sh
 export PROXY_BIND_HOST=0.0.0.0

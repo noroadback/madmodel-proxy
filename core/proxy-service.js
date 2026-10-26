@@ -10,6 +10,9 @@ const { getModelMeta } = require('./model-registry');
 const { readReasoningDelta, normalizeCompletionReasoning, normalizeReasoningDelta } = require('./thinking');
 const { startOutputTiming, recordOutput, completeOutputTiming, performanceNote } = require('./request-metrics');
 const { createHash } = require('crypto');
+const { performance } = require('node:perf_hooks');
+const { failureDiagnosticNote } = require('./failure-diagnostics');
+const { canRetryToolPrefix, createToolPrelude, hasRealToolArguments } = require('./tool-prefix-retry');
 
 function stamp() {
   return new Date().toTimeString().slice(0, 8);
@@ -73,8 +76,13 @@ function toolCallNote(calls, aggregate, result, transfer = '未转发') {
 }
 
 function hasInvalidToolCalls(body) {
-  const calls = body?.choices?.[0]?.message?.tool_calls;
-  return Array.isArray(calls) && calls.length > 0 && !validToolCalls(calls);
+  const choice = body?.choices?.[0];
+  const calls = choice?.message?.tool_calls;
+  // JSON 备用响应与非流式聚合也必须拒绝错误的集合形状，不能在转换成
+  // SSE 时静默丢掉非数组字段，再用 tool_calls 结束原因确认一次空调用。
+  if (calls == null) return choice?.finish_reason === 'tool_calls';
+  if (!Array.isArray(calls)) return true;
+  return calls.length ? !validToolCalls(calls) : choice?.finish_reason === 'tool_calls';
 }
 
 // Qwen 指定工具时可能把合法原生调用标成 stop。只修正已完成的调用，
@@ -182,28 +190,50 @@ function createProxyService(deps) {
   }
 
   function mapResult(result, prefix, sentBytes) {
+    const diagnostic = ['timeout', 'protocol-error', 'network-error'].includes(result.type)
+      ? failureDiagnosticNote(config, result) : '';
     switch (result.type) {
       case 'timeout':
         if (result.phase === 'idle') {
-          return { status: 504, note: 'idle-timeout',
+          return { status: 504, note: 'idle-timeout', diagnostic,
             message: `上游 ${config.streamIdleTimeout / 1000}s 无数据，请重试。` };
         }
         if (result.phase === 'headers') {
           const message = `上游 ${config.upstreamHeaderTimeout / 1000}s 未响应，请检查网络或稍后重试。`;
-          return { status: 502, note: 'headers-timeout', message };
+          return { status: 502, note: 'headers-timeout', message, diagnostic };
         }
-        return { status: 502, failedStream: true, ...describeFailedStream(result, prefix, config, sentBytes) };
+        return { status: 502, failedStream: true, diagnostic, ...describeFailedStream(result, prefix, config, sentBytes) };
       case 'protocol-error':
-        return { status: 502, failedStream: true, ...describeFailedStream(result, prefix, config, sentBytes) };
+        return { status: 502, failedStream: true, diagnostic, ...describeFailedStream(result, prefix, config, sentBytes) };
       case 'network-error':
         return { status: 502, note: 'network-error',
           message: `${result.phase === 'delivery' ? '向客户端交付失败' : result.phase === 'response-body' ? '读取上游响应失败' : '连接上游失败'}: ${String(result.cause).slice(0, 120)}` +
             (result.codes?.length ? `（${result.codes.join('/')}）` : ''),
-          diagnostic: result.phase ? `阶段=${result.phase} 请求体=${result.requestBytes}B 已收=${result.receivedBytes}B` +
-            (result.responseStatus !== null ? ` 上游HTTP=${result.responseStatus}` : '') : '' };
+          diagnostic: (result.phase ? `阶段=${result.phase} 请求体=${result.requestBytes}B 已收=${result.receivedBytes}B` +
+            (result.responseStatus !== null ? ` 上游HTTP=${result.responseStatus}` : '') : '') +
+            (diagnostic ? ` ${diagnostic}` : '') };
       default:
         return null; // stream/completion/upstream-error/aborted 由调用方分支处理
     }
+  }
+
+  function toolFailureDiagnostic(result, aggregate, calls, transfer = '未转发') {
+    if (!config.diagnosticsEnabled || !result?.diagnostics) return '';
+    const issue = toolCallIssue(calls);
+    const details = { kind: 'invalid-tool-call',
+      validation: aggregate?.invalidToolReason ? 'id-conflict' : ({
+        'JSON 字符串未闭合': 'json-incomplete', 'JSON 未完成': 'json-incomplete',
+        'JSON 语法无效': 'json-invalid', '工具调用 ID 重复': 'duplicate-id',
+      })[issue?.reason] || 'shape',
+      forwardingComparison: ({ '一致': 'match', '不一致': 'mismatch',
+        '未转发': 'not-forwarded', '未收到参数': 'no-arguments' })[transfer] || 'not-checked' };
+    if (!aggregate?.invalidToolCalls && Array.isArray(calls) &&
+        calls.every(call => typeof call?.function?.arguments === 'string')) {
+      details.toolArguments = aggregate
+        ? Object.entries(aggregate.toolCalls).map(([index, call]) => ({ index: Number(index), arguments: call.function.arguments }))
+        : calls.map((call, index) => ({ index, arguments: call.function.arguments }));
+    }
+    return failureDiagnosticNote(config, result, details);
   }
 
   function failRequest(ctx, mapped, model) {
@@ -272,9 +302,22 @@ function createProxyService(deps) {
         ...estimate, promptTokens, contextWindow,
         tokenBudget: typeof payload.max_tokens === 'number' ? payload.max_tokens : 0,
       };
-      const attempt = a => clientWantsStream
-        ? streamPassthrough(ctx, payload, a, extraHeaders, budgetNote, ac, budgetHint)
-        : aggregateResponse(ctx, payload, a, extraHeaders, budgetNote, ac, budgetHint);
+      // Shared across authentication refreshes as well as generation attempts.
+      let toolRetries = 0;
+      const attempt = async a => {
+        const nonstreamDeadline = performance.now() + config.nonstreamTotalTimeout;
+        for (;;) {
+          const allowToolRetry = config.toolRetryEnabled !== false && toolRetries === 0 && payload.tool_choice !== 'none';
+          const note = budgetNote + (toolRetries ? ' 工具参数重试=1' : '');
+          const outcome = clientWantsStream
+            ? await streamPassthrough(ctx, payload, a, extraHeaders, note, ac, budgetHint, allowToolRetry)
+            : await aggregateResponse(ctx, payload, a, extraHeaders, note, ac, budgetHint, allowToolRetry, nonstreamDeadline);
+          if (!outcome?.retryTool || !allowToolRetry || ctx.clientGone() || ac.signal.aborted) return outcome;
+          toolRetries++;
+          logReq(ctx.req, 100, ctx.started, ctx.size,
+            `tool-arguments-retry 工具参数空前缀无效，尚未交付，重新生成 1/1 ${outcome.diagnostic || ''}${usageNote(outcome.usage)}`, payload.model);
+        }
+      };
       let r = await attempt(auth);
       if (r && r.retryAuth) {
         if (config.tunnelMode && waitForCredentials) {
@@ -322,7 +365,7 @@ function createProxyService(deps) {
     return inflightWait.promise;
   }
 
-  async function streamPassthrough(ctx, payload, auth, extraHeaders, budgetNote, ac, budgetHint) {
+  async function streamPassthrough(ctx, payload, auth, extraHeaders, budgetNote, ac, budgetHint, allowToolRetry) {
     const { req, started, size } = ctx;
     startOutputTiming(ctx);
     const servedModel = payload.model;
@@ -334,14 +377,22 @@ function createProxyService(deps) {
     const buffered = [];
     let sawStructured = false;
     const structuredAgg = createAggregator(servedModel, streamThinkingField);
+    const upstreamFinishes = new Set();
     const receivedArguments = new Map(), forwardedArguments = new Map();
-    const writeChunk = async obj => {
+    const writeDirect = async obj => {
       await ctx.writeSseChunk(obj);
       recordArguments(forwardedArguments, obj);
     };
+    const prelude = allowToolRetry && Array.isArray(payload.tools) && payload.tools.some(tool => tool?.type === 'function')
+      ? createToolPrelude({ write: writeDirect, signal: ac.signal, onError: () => {
+        if (!ctx.clientGone() && !ac.signal.aborted) ctx.sendStreamError('向客户端交付回复失败，请重试。', 'proxy_error', 502);
+        ac.abort();
+      } }) : null;
+    const writeChunk = obj => prelude ? prelude.write(obj) : writeDirect(obj);
     const invalidToolNote = (calls, result) => {
-      let transfer = incremental ? (receivedArguments.size ? '一致' : '未收到参数') : '未转发';
-      if (incremental) {
+      const checkForwarding = incremental && !prelude?.canRetry;
+      let transfer = checkForwarding ? (receivedArguments.size ? '一致' : '未收到参数') : '未转发';
+      if (checkForwarding) {
         if (receivedArguments.size !== forwardedArguments.size) transfer = '不一致';
         for (const [key, source] of receivedArguments) {
           const target = forwardedArguments.get(key);
@@ -349,10 +400,12 @@ function createProxyService(deps) {
               source.hash.copy().digest('hex') !== target.hash.copy().digest('hex')) transfer = '不一致';
         }
       }
-      return toolCallNote(calls, structuredAgg, result, transfer);
+      return toolCallNote(calls, structuredAgg, result, transfer) +
+        ` ${toolFailureDiagnostic(result, structuredAgg, calls, transfer)}`;
     };
 
-    const result = await upstreamClient.request({
+    let result;
+    try { result = await upstreamClient.request({
       payload, token: auth.token, cookie: auth.cookie, signal: ac.signal,
       onChunk: async (obj, timing) => {
         recordOutput(ctx, obj, streamThinkingField, timing?.receivedAt);
@@ -378,9 +431,15 @@ function createProxyService(deps) {
             throw error;
           }
         }
-        if (ch?.finish_reason) structuredAgg.finish = ch.finish_reason;
+        if (ch?.finish_reason) {
+          structuredAgg.finish = ch.finish_reason;
+          upstreamFinishes.add(ch.finish_reason);
+        }
         if (ch?.finish_reason === 'tool_calls') sawStructured = true;
         const rDelta = readReasoningDelta(d, streamThinkingField);
+        // Buffered mode holds tools separately; observing real arguments still
+        // releases any small reasoning prelude without releasing the tools.
+        if (!incremental && hasRealToolArguments(obj)) await prelude?.flush();
 
         if (incremental) {
           // 最后一段参数可能与 finish/usage 同帧。参数现在就发，收尾拆开
@@ -407,7 +466,7 @@ function createProxyService(deps) {
           if (rDelta !== null) {
             normalizeReasoningDelta(held, streamThinkingField);
             const { reasoning_content, ...heldDelta } = held.choices[0].delta;
-            await ctx.writeSseChunk({ ...held, usage: undefined,
+            await writeChunk({ ...held, usage: undefined,
               choices: [{ ...ch, delta: { reasoning_content }, finish_reason: null }] });
             held = { ...held, choices: [{ ...ch, delta: heldDelta }] };
           }
@@ -420,16 +479,14 @@ function createProxyService(deps) {
           return;
         }
 
-        ctx.ensureSseHeaders();
-        await ctx.writeSseChunk(obj);
+        await writeChunk(obj);
       },
-    });
+    }); } finally { prelude?.freeze(); }
     // DONE 的上游到达时间先冻结，最终校验/冲刷不计入输出速度。
     completeOutputTiming(ctx, result);
-    const flushBuffer = async () => {
-      if (!buffered.length) return true;
-      // 上游 [DONE] 后它的总计时器已结束，最终交付仍需有限等待，尤其是
-      // buffered 模式。客户端永久停读不能让校验后的冲刷一直占有槽位。
+    const deliverFinal = async write => {
+      // 上游结束后它的总计时器已清理。全部最终写入共用交付时限，包含
+      // 缓冲冲刷、JSON 备用响应、usage 和 [DONE]，不能只保护 buffered。
       let deliveryTimedOut = false;
       const timer = setTimeout(() => {
         deliveryTimedOut = true;
@@ -437,29 +494,33 @@ function createProxyService(deps) {
         ac.abort();
       }, config.streamTotalTimeout);
       try {
-        ctx.ensureSseHeaders();
-        for (const frame of buffered) {
-          if (ac.signal.aborted || ctx.clientGone()) return false;
-          await ctx.writeSseChunk(frame);
-        }
         if (ac.signal.aborted || ctx.clientGone()) return false;
-        return true;
+        await write();
+        return !ac.signal.aborted && !ctx.clientGone();
       } catch (error) {
-        if (!deliveryTimedOut && !ctx.clientGone()) throw error;
-        logReq(req, ctx.clientGone() ? 499 : 200, started, size,
-          deliveryTimedOut ? 'stream-delivery-timeout 向客户端交付回复超时' : '客户端已断开', servedModel);
+        if (!deliveryTimedOut && !ctx.clientGone() && !ac.signal.aborted) throw error;
         return false;
       } finally {
         clearTimeout(timer);
         buffered.length = 0;
+        if (deliveryTimedOut || ctx.clientGone()) {
+          const diagnostic = failureDiagnosticNote(config, result,
+            { kind: deliveryTimedOut ? 'delivery-timeout' : 'client-cancelled' });
+          logReq(req, ctx.clientGone() ? 499 : 200, started, size,
+            (deliveryTimedOut ? 'stream-delivery-timeout 向客户端交付回复超时' : '客户端已断开') +
+              ` ${diagnostic}`, servedModel);
+        }
       }
     };
 
     if (ctx.clientGone() || result.type === 'aborted') {
-      logReq(req, 499, started, size, '客户端已断开', servedModel);
+      prelude?.discard();
+      logReq(req, 499, started, size, `客户端已断开 ${failureDiagnosticNote(config, result, { kind: 'client-cancelled' })}`, servedModel);
       return;
     }
     if (result.type === 'upstream-error') {
+      prelude?.discard();
+      const diagnostic = failureDiagnosticNote(config, result);
       reportTunnelAuthLost(result);
       if (!ctx.sseHeadersSent() &&
           result.status >= 300 && result.status < 400 &&
@@ -469,23 +530,24 @@ function createProxyService(deps) {
       if (!ctx.sseHeadersSent()) {
         ctx.dumpFailed();
         const mapped = translateUpstreamError(result.body, result.raw, result.status, budgetHint);
-        logReq(req, mapped.http, started, size, mapped.message, servedModel);
+        logReq(req, mapped.http, started, size, `${mapped.message} ${diagnostic}`, servedModel);
         return ctx.sendError(mapped.http, mapped.message, mapped.type || 'upstream_error',
           errorHeaders(result, mapped.http, extraHeaders), mapped.code);
       }
       const mapped = translateUpstreamError(result.body, result.raw, result.status, budgetHint);
       ctx.sendStreamError(mapped.message, mapped.type || 'upstream_error', mapped.code ?? mapped.http);
-      logReq(req, 200, started, size, `回复中断 ${mapped.message}`, servedModel);
+      logReq(req, 200, started, size, `回复中断 ${mapped.message} ${diagnostic}`, servedModel);
       return;
     }
     const mapped = mapResult(result, 'stream', ctx.sseBytes());
     if (mapped) {
+      prelude?.discard();
       if (mapped.failedStream) {
         if (ctx.sseHeadersSent()) {
           ctx.sendStreamError(mapped.message, 'upstream_error', mapped.status);
-          logReq(req, 200, started, size, `${mapped.note}${idleNote(result)} ${mapped.message}`, servedModel);
+          logReq(req, 200, started, size, `${mapped.note}${idleNote(result)} ${mapped.message} ${mapped.diagnostic}`, servedModel);
         } else {
-          logReq(req, 502, started, size, `${mapped.note}${idleNote(result)} ${mapped.message}`, servedModel);
+          logReq(req, 502, started, size, `${mapped.note}${idleNote(result)} ${mapped.message} ${mapped.diagnostic}`, servedModel);
           ctx.sendError(502, mapped.message);
         }
         return;
@@ -495,12 +557,19 @@ function createProxyService(deps) {
     if (result.type === 'stream' && sawStructured) {
       const calls = structuredAgg.result().choices?.[0]?.message?.tool_calls;
       if (structuredAgg.invalidToolCalls || !validToolCalls(calls)) {
+        const diagnostic = invalidToolNote(calls, result);
+        if (allowToolRetry && !structuredAgg.invalidToolCalls && upstreamFinishes.size === 1 && !ctx.headersSent() &&
+            (!prelude || prelude.canRetry) && canRetryToolPrefix(calls, payload.tools, structuredAgg.finish)) {
+          prelude?.discard();
+          return { retryTool: true, diagnostic, usage: result.usage };
+        }
+        prelude?.discard();
         const message = '上游返回的工具调用参数不是有效 JSON，请重试。';
         if (ctx.sseHeadersSent()) {
           ctx.sendStreamError(message, 'upstream_error', 502);
-          logReq(req, 200, started, size, `stream-invalid-tool-call 流内错误=502 ${message} ${invalidToolNote(calls, result)}`, servedModel);
+          logReq(req, 200, started, size, `stream-invalid-tool-call 流内错误=502 ${message} ${diagnostic}`, servedModel);
         } else {
-          logReq(req, 502, started, size, `${message} ${invalidToolNote(calls, result)}`, servedModel);
+          logReq(req, 502, started, size, `${message} ${diagnostic}`, servedModel);
           ctx.sendError(502, message);
         }
         return;
@@ -512,17 +581,23 @@ function createProxyService(deps) {
         buffered.unshift({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] });
       }
     }
-    if (!await flushBuffer()) return;
+    let completionChunk = null;
     if (result.type === 'completion') {
       if (hasInvalidToolCalls(result.body)) {
         const message = '上游返回的工具调用参数不是有效 JSON，请重试。';
-        logReq(req, 502, started, size, `${message} ${toolCallNote(result.body?.choices?.[0]?.message?.tool_calls, null, result)}`, servedModel);
+        const calls = result.body?.choices?.[0]?.message?.tool_calls;
+        if (allowToolRetry && !ctx.headersSent() && canRetryToolPrefix(calls, payload.tools, result.body?.choices?.[0]?.finish_reason)) {
+          const diagnostic = `${toolCallNote(calls, null, result)} ${toolFailureDiagnostic(result, null, calls)}`;
+          prelude?.discard();
+          return { retryTool: true, diagnostic, usage: result.body.usage };
+        }
+        logReq(req, 502, started, size, `${message} ${toolCallNote(calls, null, result)} ${toolFailureDiagnostic(result, null, calls)}`, servedModel);
         return ctx.sendError(502, message);
       }
       normalizeToolCallFinish(result.body.choices?.[0]);
       const m = result.body.choices?.[0]?.message || {};
       const fbReasoning = readReasoningDelta(m, streamThinkingField);
-      const chunk = {
+      completionChunk = {
         id: result.body.id,
         object: 'chat.completion.chunk',
         created: result.body.created,
@@ -542,42 +617,62 @@ function createProxyService(deps) {
           finish_reason: result.body.choices?.[0]?.finish_reason ?? 'stop',
         }],
       };
-      await ctx.writeSseChunk(chunk);
-      if (result.body.usage) {
-        await ctx.writeSseLine(`data: ${JSON.stringify({
-          id: result.body.id, object: 'chat.completion.chunk', choices: [], usage: result.body.usage,
-        })}\n\n`);
-      }
-      await ctx.writeSseLine('data: [DONE]\n\n');
-      ctx.endResponse();
-      logReq(req, 200, started, size, `流式${budgetNote}${requestUsageNote(ctx, result.body.usage)}`, servedModel);
-      return;
     }
-    if (ctx.sseHeadersSent()) {
+    if (!completionChunk && !buffered.length && !prelude?.hasPending && !ctx.sseHeadersSent()) {
+      prelude?.discard();
+      logReq(req, 502, started, size, `上游返回空流 ${failureDiagnosticNote(config, result, { kind: 'empty-stream' })}`, servedModel);
+      return ctx.sendError(502, '上游返回空流');
+    }
+    const delivered = await deliverFinal(async () => {
+      await prelude?.flush();
+      if (ac.signal.aborted || ctx.clientGone()) return;
+      ctx.ensureSseHeaders();
+      for (const frame of buffered) {
+        if (ac.signal.aborted || ctx.clientGone()) return;
+        await ctx.writeSseChunk(frame);
+      }
+      if (completionChunk) {
+        if (ac.signal.aborted || ctx.clientGone()) return;
+        await ctx.writeSseChunk(completionChunk);
+        if (result.body.usage) {
+          if (ac.signal.aborted || ctx.clientGone()) return;
+          await ctx.writeSseLine(`data: ${JSON.stringify({
+            id: result.body.id, object: 'chat.completion.chunk', choices: [], usage: result.body.usage,
+          })}\n\n`);
+        }
+      }
+      if (ac.signal.aborted || ctx.clientGone()) return;
       await ctx.writeSseLine('data: [DONE]\n\n');
+      if (ac.signal.aborted || ctx.clientGone()) return;
       ctx.endResponse();
-      logReq(req, 200, started, size, `流式${budgetNote}${requestUsageNote(ctx, result.usage)}`, servedModel);
-    } else {
-      logReq(req, 502, started, size, '上游返回空流', servedModel);
-      ctx.sendError(502, '上游返回空流');
+    });
+    if (delivered) {
+      const usage = result.type === 'completion' ? result.body.usage : result.usage;
+      logReq(req, 200, started, size, `流式${budgetNote}${requestUsageNote(ctx, usage)}`, servedModel);
     }
   }
 
-  async function aggregateResponse(ctx, payload, auth, extraHeaders, budgetNote, ac, budgetHint) {
+  async function aggregateResponse(ctx, payload, auth, extraHeaders, budgetNote, ac, budgetHint, allowToolRetry, deadline) {
     const { req, started, size } = ctx;
     startOutputTiming(ctx);
     const aggMeta = metaFor(payload.model);
     const aggThinkingField = aggMeta && typeof aggMeta.thinkingField === 'string' ? aggMeta.thinkingField : null;
     const agg = createAggregator(payload.model, aggThinkingField);
+    const upstreamFinishes = new Set();
     let chunkCount = 0;
     let timedOut = false;
+    const remainingMs = Math.max(0, deadline - performance.now());
+    if (remainingMs === 0) {
+      logReq(req, 504, started, size, '工具参数重试前已达到非流式总时限', payload.model);
+      return ctx.sendError(504, '生成超时，请缩短对话或改用流式。');
+    }
     const timer = setTimeout(() => {
       timedOut = true;
       ac.abort(); // 中止上游,迟到的结果不再写响应
       if (!ctx.clientGone() && !ctx.headersSent()) {
         ctx.sendError(504, `生成超时（${config.nonstreamTotalTimeout / 1000}s），请缩短对话或改用流式。`);
       }
-    }, config.nonstreamTotalTimeout);
+    }, remainingMs);
     let result;
     try {
       result = await upstreamClient.request({
@@ -586,20 +681,22 @@ function createProxyService(deps) {
           recordOutput(ctx, obj, aggThinkingField, timing?.receivedAt);
           chunkCount++;
           agg.feed(obj);
+          if (obj?.choices?.[0]?.finish_reason) upstreamFinishes.add(obj.choices[0].finish_reason);
         },
       });
     } finally { clearTimeout(timer); }
     completeOutputTiming(ctx, result);
 
     if (timedOut) { // 504 已由定时器发出,这里只补日志
-      logReq(req, 504, started, size, '生成超时，请缩短对话或改用流式', payload.model);
+      logReq(req, 504, started, size, `生成超时，请缩短对话或改用流式 ${failureDiagnosticNote(config, result, { kind: 'aggregate-timeout' })}`, payload.model);
       return;
     }
     if (ctx.clientGone() || result.type === 'aborted') {
-      logReq(req, 499, started, size, '客户端已断开', payload.model);
+      logReq(req, 499, started, size, `客户端已断开 ${failureDiagnosticNote(config, result, { kind: 'client-cancelled' })}`, payload.model);
       return;
     }
     if (result.type === 'upstream-error') {
+      const diagnostic = failureDiagnosticNote(config, result);
       reportTunnelAuthLost(result);
       if (!ctx.sseHeadersSent() &&
           result.status >= 300 && result.status < 400 &&
@@ -608,28 +705,36 @@ function createProxyService(deps) {
       }
       ctx.dumpFailed();
       const mapped = translateUpstreamError(result.body, result.raw, result.status, budgetHint);
-      logReq(req, mapped.http, started, size, mapped.message, payload.model);
+      logReq(req, mapped.http, started, size, `${mapped.message} ${diagnostic}`, payload.model);
       return ctx.sendError(mapped.http, mapped.message, mapped.type || 'upstream_error',
         errorHeaders(result, mapped.http, extraHeaders), mapped.code);
     }
     const mapped = mapResult(result, 'agg');
     if (mapped) {
       if (mapped.failedStream) {
-        logReq(req, 502, started, size, `${mapped.note}${idleNote(result)} ${mapped.message}`, payload.model);
+        logReq(req, 502, started, size, `${mapped.note}${idleNote(result)} ${mapped.message} ${mapped.diagnostic}`, payload.model);
         return ctx.sendError(502, mapped.message);
       }
       return failRequest(ctx, mapped, payload.model);
     }
     if (result.type !== 'completion' && chunkCount === 0) {
-      logReq(req, 502, started, size, '上游返回空流', payload.model);
+      logReq(req, 502, started, size, `上游返回空流 ${failureDiagnosticNote(config, result, { kind: 'empty-stream' })}`, payload.model);
       return ctx.sendError(502, '上游返回空流');
     }
     const out = result.type === 'completion' ? result.body : agg.result();
     normalizeCompletionReasoning(out, aggThinkingField);
     if ((result.type === 'stream' && agg.invalidToolCalls) || hasInvalidToolCalls(out)) {
       const message = '上游返回的工具调用参数不是有效 JSON，请重试。';
+      const calls = out.choices?.[0]?.message?.tool_calls;
+      const aggregate = result.type === 'stream' ? agg : null;
+      if (allowToolRetry && !agg.invalidToolCalls && !ctx.headersSent() &&
+          (result.type === 'completion' || upstreamFinishes.size === 1) &&
+          canRetryToolPrefix(calls, payload.tools, result.type === 'stream' ? agg.finish : out.choices?.[0]?.finish_reason)) {
+        return { retryTool: true, usage: result.type === 'completion' ? out.usage : agg.usage, diagnostic:
+          `${toolCallNote(calls, aggregate, result)} ${toolFailureDiagnostic(result, aggregate, calls)}` };
+      }
       logReq(req, 502, started, size,
-        `${message} ${toolCallNote(out.choices?.[0]?.message?.tool_calls, result.type === 'stream' ? agg : null, result)}`, payload.model);
+        `${message} ${toolCallNote(calls, aggregate, result)} ${toolFailureDiagnostic(result, aggregate, calls)}`, payload.model);
       return ctx.sendError(502, message);
     }
     normalizeToolCallFinish(out.choices?.[0]);

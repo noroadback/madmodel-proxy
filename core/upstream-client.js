@@ -39,6 +39,7 @@
 const { randomUUID } = require('crypto');
 const { performance } = require('node:perf_hooks');
 const { SseParser } = require('./stream-parser');
+const { createFailureDiagnostics } = require('./failure-diagnostics');
 
 // 限量读:错误页/直答异常膨胀时及时放弃,不无限缓冲(超限抛 UPSTREAM_BODY_LIMIT)
 async function readLimited(reader, limit, onProgress) {
@@ -98,6 +99,7 @@ function createUpstreamClient(config) {
 
   function request({ payload, token, cookie, signal, onChunk, onOpen }) {
     return new Promise((resolve) => {
+      const diagnostics = createFailureDiagnostics(config);
       // 零字节截断时"已等待多久"的计时起点(见 truncated 结果的 idleMs)
       const requestStart = Date.now();
       // 单一 AbortController:外部 signal(客户端断开/聚合超时)与 header 超时
@@ -132,6 +134,7 @@ function createUpstreamClient(config) {
         clearTimeout(idleTimer);
         clearTimeout(totalTimer);
         if (signal) signal.removeEventListener('abort', onAbort);
+        if (diagnostics) v.diagnostics = diagnostics.finish({ phase, requestBytes, receivedBytes, responseStatus });
         resolve(v);
       };
       const cancelBody = () => {
@@ -183,13 +186,14 @@ function createUpstreamClient(config) {
         }
         const requestBody = Buffer.from(JSON.stringify(outgoingPayload), 'utf8');
         requestBytes = requestBody.length;
-        const up = await fetch(upstream, {
+        const fetchRequest = () => fetch(upstream, {
           method: 'POST',
           headers: reqHeaders,
           body: requestBody,
           redirect: 'manual',
           signal: lifecycle.signal,
         });
+        const up = await (diagnostics ? diagnostics.run(fetchRequest) : fetchRequest());
         clearTimeout(headerTimer);
         upBody = up.body;
         phase = 'response-body';
@@ -227,6 +231,7 @@ function createUpstreamClient(config) {
           });
         }
         const isSse = /event-stream/i.test(up.headers.get('content-type') || '');
+        diagnostics?.open(isSse);
         if (onOpen) onOpen(isSse);
 
         if (!isSse) {
@@ -246,6 +251,7 @@ function createUpstreamClient(config) {
             return finish(networkError(e, '上游 JSON 响应读取失败'));
           }
           if (settled) return; // 等待读取期间超时/取消已收尾
+          diagnostics?.json(bytes);
           let text;
           try {
             // 200 JSON 也可能携带原生工具调用，不能把损坏字节替换后交付。
@@ -276,17 +282,24 @@ function createUpstreamClient(config) {
           const { done, value } = await reader.read();
           const receivedAt = performance.now();
           if (settled) return;
-          if (done) break;
-          sawBytes = true;
-          receivedBytes += value.length;
-          lastBytesAt = Date.now();
-          armIdle();
-          total += value.length;
-          if (total > upstreamSseTotalLimit) {
-            cancelBody();
-            return finish(networkError({ code: 'UPSTREAM_BODY_LIMIT' }, `上游响应超过 ${upstreamSseTotalLimit / 1048576}MB 上限`));
+          let events;
+          if (done) {
+            diagnostics?.end();
+            events = parser.finish();
+          } else {
+            sawBytes = true;
+            receivedBytes += value.length;
+            lastBytesAt = Date.now();
+            armIdle();
+            total += value.length;
+            if (total > upstreamSseTotalLimit) {
+              cancelBody();
+              return finish(networkError({ code: 'UPSTREAM_BODY_LIMIT' }, `上游响应超过 ${upstreamSseTotalLimit / 1048576}MB 上限`));
+            }
+            diagnostics?.bytes(value);
+            events = parser.push(value);
           }
-          for (const event of parser.push(value)) {
+          for (const event of events) {
             if (event.type === 'done') {
               // [DONE] 即终止:立即取消 reader,不等上游关闭连接
               cancelBody();
@@ -330,6 +343,7 @@ function createUpstreamClient(config) {
             }
             if (settled) return;
           }
+          if (done) break;
         }
         // EOF 但未见 [DONE]:上游截断(网关掐流/连接中断),不能当正常结束,
         // 否则下游会把半截回答当完整回答。idleMs 一并带回:距上一帧收到的

@@ -363,6 +363,9 @@ async function requestWithRedirects(options, jar, maxRedirects = 16) {
 
     const redirect = res.headers.get('location');
     if (res.status >= 300 && res.status < 400 && redirect) {
+      // 每一条重定向出口都丢弃响应体，包括跳数超限、地址非法和目标被拒绝。
+      // 不等到校验成功后才取消，否则失败的认证链会把连接留到超时或 GC。
+      try { await res.body?.cancel(); } catch (e) { /* 已结束/无 body */ }
       if (hops >= maxRedirects) {
         const err = new Error('重定向次数过多');
         err.code = 'TOO_MANY_REDIRECTS';
@@ -381,10 +384,6 @@ async function requestWithRedirects(options, jar, maxRedirects = 16) {
         method = 'GET';
         data = null;
       }
-      // 丢弃这一跳的响应体:重定向响应不需要读,但不 cancel 会让连接挂到 GC
-      // 才释放——登录链一跳一次,watch 长跑下会累积占用连接池
-      // (2026-09-22 审阅指出)
-      try { await res.body?.cancel(); } catch (e) { /* 已结束/无 body */ }
       continue;
     }
     const buf = await readBodyLimited(res);

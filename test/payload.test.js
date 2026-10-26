@@ -20,6 +20,30 @@ test('parseJsonBody: 非 JSON 抛 INVALID_JSON', () => {
   assert.throws(() => parseJsonBody(Buffer.from('not json')), e => e.code === 'INVALID_JSON');
 });
 
+test('parseJsonBody: 非法 UTF-8 不会替换后转发为合法对话', () => {
+  const invalidBodies = [
+    Buffer.concat([Buffer.from('{"messages":[{"content":"'), Buffer.from([0xff]), Buffer.from('"}]}')]),
+    Buffer.concat([Buffer.from('{"content":"'), Buffer.from([0xe4, 0xbd])]),
+  ];
+  for (const body of invalidBodies) {
+    assert.throws(() => parseJsonBody(body), e => e.code === 'INVALID_UTF8' && /UTF-8/.test(e.message));
+  }
+  const valid = { content: '中文与 emoji 😀、客户端实际写入的替换字符 �' };
+  assert.deepStrictEqual(parseJsonBody(Buffer.from(JSON.stringify(valid))), valid);
+});
+
+test('parseJsonBody: 解析错误不回显请求正文，仅保留类别与位置', () => {
+  const marker = 'PRIVATE-PROMPT-CONTENT';
+  for (const source of [marker, `"${marker}" trailing`, `{"content":"${marker}`]) {
+    assert.throws(() => parseJsonBody(Buffer.from(source)), e => {
+      assert.strictEqual(e.code, 'INVALID_JSON');
+      assert.ok(!e.message.includes(marker));
+      assert.match(e.message, /^请求体不是合法 JSON: (语法无效|字符串未闭合|内容未完成)(（位置 \d+）)?$/);
+      return true;
+    });
+  }
+});
+
 test('parseJsonBody: 数组/null/标量抛 INVALID_PAYLOAD', () => {
   for (const raw of ['[1,2]', 'null', '42', '"str"']) {
     assert.throws(() => parseJsonBody(Buffer.from(raw)), e => e.code === 'INVALID_PAYLOAD');

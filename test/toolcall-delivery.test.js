@@ -85,12 +85,13 @@ test('原生工具调用交付', async t => {
 
   // 记录上游请求次数。
   let seen = [];
-  const chat = async (stream, extra = {}) => {
+  const chat = async (stream, extra = {}, onHeaders) => {
     const r = await fetch(url, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ model: 'DeepSeek-V4.1-Flash',
         messages: [{ role: 'user', content: '用 Bash 执行 Get-Location' }], stream, max_tokens: 200, ...extra }),
     });
+    if (onHeaders) await onHeaders(r);
     const text = await r.text();
     let json = null; try { json = JSON.parse(text); } catch (e) {}
     return { status: r.status, json, text };
@@ -257,19 +258,53 @@ test('原生工具调用交付', async t => {
       }
     }
 
+    for (const stream of [true, false]) {
+      for (const upstreamFormat of ['sse', 'json']) {
+        for (const [label, calls] of [['缺少集合', undefined], ['null 集合', null],
+          ['空集合', []], ['对象集合', {}], ['字符串集合', 'invalid']]) {
+          await t.test(`拒绝用工具结束原因确认${label}: stream=${stream}, upstream=${upstreamFormat}`, async () => {
+            mock.set((req, res) => {
+              req.resume();
+              req.on('end', () => {
+                if (upstreamFormat === 'sse') {
+                  sse(res, [JSON.stringify({ choices: [{ index: 0,
+                    delta: { tool_calls: calls }, finish_reason: 'tool_calls' }] })]);
+                } else {
+                  res.writeHead(200, { 'content-type': 'application/json' });
+                  res.end(JSON.stringify({ choices: [{ index: 0,
+                    message: { role: 'assistant', tool_calls: calls }, finish_reason: 'tool_calls' }] }));
+                }
+              });
+            });
+            const r = await chat(stream, { tools: TOOLS });
+            assert.strictEqual(r.status, 502, r.text);
+            assert.ok(r.json?.error?.message.includes('不是有效 JSON'), r.text);
+            assert.ok(!r.text.includes('[DONE]'));
+          });
+        }
+      }
+    }
+
     await t.test('思考已交付后发现坏工具调用，关闭流且不冲刷调用或 DONE', async () => {
       seen = [];
+      let upstreamResponse;
       mock.set((req, res) => {
         req.resume();
         req.on('end', () => {
           seen.push(1);
-          sse(res, [JSON.stringify({ choices: [{ index: 0,
-            delta: { reasoning_content: '先检查路径。' }, finish_reason: null }] }),
-          JSON.stringify({ choices: [{ index: 0,
-            delta: { tool_calls: [completeCall, invalidCalls[0][1]] }, finish_reason: 'tool_calls' }] })]);
+          upstreamResponse = res;
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          res.write(`data: ${JSON.stringify({ choices: [{ index: 0,
+            delta: { reasoning_content: '先检查路径。' }, finish_reason: null }] })}\n\n`);
         });
       });
-      const r = await chat(true, { tools: TOOLS });
+      const r = await chat(true, { tools: TOOLS }, () => {
+        // Observe actual client headers before injecting the failure. The new
+        // short prelude must not turn this into an assumption about write time.
+        upstreamResponse.write(`data: ${JSON.stringify({ choices: [{ index: 0,
+          delta: { tool_calls: [completeCall, invalidCalls[0][1]] }, finish_reason: 'tool_calls' }] })}\n\n`);
+        upstreamResponse.end('data: [DONE]\n\n');
+      });
       assert.strictEqual(seen.length, 1);
       assert.strictEqual(r.status, 200, '思考已发出，HTTP 状态无法再改');
       assert.ok(r.text.includes('先检查路径。'));

@@ -137,6 +137,75 @@ test('200 JSON 备用响应也拒绝非法 UTF-8 的工具参数', async t => {
   }
 });
 
+test('HTTP 入口拒绝非法 UTF-8 和 JSON，不调用上游或回显原文', async t => {
+  const h = await harness(t);
+  let upstreamCalls = 0;
+  h.set((_req, res) => { upstreamCalls++; openSse(res); endSse(res); });
+  const logs = [];
+  t.mock.method(console, 'log', line => logs.push(line));
+  for (const body of [
+    Buffer.concat([Buffer.from('{"model":"'), Buffer.from([0xff]), Buffer.from('private-body"}')]),
+    Buffer.from('{"model":"DeepSeek-V4.1-Flash","private":"private-body" broken}'),
+  ]) {
+    const response = await deadline(new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port: h.config.port,
+        path: '/v1/chat/completions', method: 'POST', agent: false,
+        headers: { 'content-type': 'application/json', 'content-length': body.length } }, res => {
+        let text = '';
+        res.setEncoding('utf8');
+        res.on('data', value => { text += value; });
+        res.on('error', reject);
+        res.on('end', () => resolve({ status: res.statusCode, text }));
+      });
+      req.on('error', reject);
+      req.end(body);
+    }));
+    assert.equal(response.status, 400, response.text);
+    assert.ok(!response.text.includes('private-body'));
+  }
+  assert.equal(upstreamCalls, 0);
+  assert.ok(logs.length >= 2);
+  assert.ok(logs.every(line => !line.includes('private-body')));
+});
+
+test('完整 HTTP 工具失败取证按真实索引核对原始参数，仅记录脱敏结果', async t => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  for (const stream of [true, false]) {
+    await t.test(`stream=${stream}`, async t => {
+      const tokenFile = path.join(path.dirname(baseConfig.tokenFile), 'diagnostic-tool-flow', String(stream), 'token.json');
+      const file = path.join(path.dirname(tokenFile), 'failure-diagnostics.jsonl');
+      const h = await harness(t, { diagnosticsEnabled: true, tokenFile });
+      const logs = [];
+      t.mock.method(console, 'log', line => logs.push(line));
+      h.set((_req, res) => {
+        openSse(res);
+        writeSse(res, chunk({ tool_calls: [{ ...CALL, index: 3,
+          function: { name: 'Bash', arguments: '{"command":"' } }] }));
+        writeSse(res, chunk({ tool_calls: [{ index: 3,
+          function: { arguments: 'private-argument-marker' } }] }, 'length', USAGE));
+        endSse(res);
+      });
+      const client = h.open({ stream });
+      await deadline(client.done);
+      if (stream) assertStreamError(client, /不是有效 JSON/);
+      else assert.equal(client.status, 502, client.text);
+      const text = fs.readFileSync(file, 'utf8');
+      const records = text.trim().split('\n').map(line => JSON.parse(line));
+      assert.equal(records.length, 1, '同一次失败只保存一条取证记录');
+      assert.equal(records[0].kind, 'invalid-tool-call');
+      assert.equal(records[0].argumentComparison, 'match');
+      assert.equal(records[0].wire.sawDone, true);
+      assert.equal(records[0].wire.finishReason, 'length');
+      assert.equal(records[0].wire.tools[0].index, 3, '稀疏索引不能按数组顺序改写为0');
+      assert.ok(logs.some(line => line.includes(records[0].requestId)));
+      assert.ok(!text.includes('private-argument-marker'));
+      assert.ok(!text.includes('local-stream-test-token'));
+      assert.ok(!text.includes('"hash"'));
+    });
+  }
+});
+
 function deferred() {
   let resolve;
   const promise = new Promise(r => { resolve = r; });
@@ -265,7 +334,7 @@ function assertSuccess(client, expectedArguments = CALL.function.arguments, expe
   assert.equal(values(client).filter(value => value.error).length, 0);
 }
 
-async function harness(t, overrides = {}) {
+async function harness(t, overrides = {}, decorateContext) {
   let handler = (_req, res) => { res.writeHead(500); res.end('mock handler missing'); };
   const sockets = new Set();
   const upstream = http.createServer((req, res) => {
@@ -303,7 +372,10 @@ async function harness(t, overrides = {}) {
     return result;
   } };
   const service = createProxyService({ config, tokenState: createTokenState(getToken), upstreamClient });
-  const { server } = createHttpServer({ config, service, getToken });
+  const { server } = createHttpServer({ config, service: decorateContext ? {
+    ...service,
+    handleRequest(ctx) { decorateContext(ctx); return service.handleRequest(ctx); },
+  } : service, getToken });
   await new Promise(resolve => server.listen(port, '127.0.0.1', resolve));
   const clients = new Set();
   t.after(async () => {
@@ -332,6 +404,73 @@ test('原生工具参数 streaming 完整 HTTP 回归', async t => {
     assert.equal(reloadConfig('incremental').toolStreamMode, 'incremental');
     assert.equal(reloadConfig('unknown').toolStreamMode, 'incremental');
   });
+
+  await t.test('DONE 后的 error 事件字段跨网络块时，不能提前确认工具调用', async t => {
+    const h = await harness(t);
+    const sentDoneLine = deferred();
+    h.set((_req, res) => {
+      openSse(res);
+      writeSse(res, toolChunk(CALL.function.arguments, true, 'tool_calls', USAGE));
+      res.write('data: [DONE]\n');
+      sentDoneLine.resolve(res);
+    });
+    const client = h.open();
+    await client.waitFor(value => argumentDeltas(value).length === 1);
+    const res = await deadline(sentDoneLine.promise);
+    await delay(60);
+    assertNoTerminal(client);
+    assert.equal(client.ended, false, '当前 SSE 事件未结束时不能把 DONE 当作成功');
+    res.end('event: error\n\n');
+    await deadline(client.done);
+    assertStreamError(client, /错误/);
+  });
+
+  for (const stage of ['json-chunk', 'json-usage', 'stream-done']) {
+    await t.test(`最终交付时限覆盖 ${stage} 的受控背压并归还槽位`, async t => {
+      const blocked = deferred();
+      let blockedWrites = 0, cancelledWrites = 0;
+      const h = await harness(t, { streamTotalTimeout: 100 }, ctx => {
+        const payload = JSON.parse(ctx.rawBody);
+        if (payload.messages[0].content === 'probe') return;
+        const write = ctx.writeSseLine;
+        ctx.writeSseLine = line => {
+          const target = stage === 'stream-done' ? line.includes('[DONE]')
+            : stage === 'json-usage' ? line.includes('"usage"') : line.includes('"delta"');
+          if (!target) return write(line);
+          blockedWrites++;
+          blocked.resolve();
+          return new Promise((resolve, reject) => {
+            const cancelled = () => { cancelledWrites++; reject(new Error('受控交付已取消')); };
+            if (ctx.abortController.signal.aborted) cancelled();
+            else ctx.abortController.signal.addEventListener('abort', cancelled, { once: true });
+          });
+        };
+      });
+      h.set((_req, res, payload) => {
+        if (payload.messages[0].content === 'probe' || stage === 'stream-done') {
+          openSse(res);
+          writeSse(res, chunk({ content: 'ok' }, 'stop', USAGE));
+          return endSse(res);
+        }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ id: 'final-delivery', model: MODEL,
+          choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+          usage: USAGE }));
+      });
+      const client = h.open();
+      await deadline(blocked.promise);
+      await deadline(client.done, 1500, '上游完成后的背压未受交付时限保护');
+      assert.equal(client.status, 200);
+      assert.equal(blockedWrites, 1, '超时后不得继续写出其他帧');
+      assert.equal(cancelledWrites, 1, '交付超时必须解除等待');
+      assert.equal(client.events.filter(event => event.event === 'error').length, 1);
+      assert.equal(client.events.filter(event => event.done).length, 0);
+      assert.match(client.text, /交付回复超时/);
+      const probe = h.open({ messages: [{ role: 'user', content: 'probe' }] });
+      await deadline(probe.done);
+      assert.equal(probe.status, 200, '最终交付失败后必须归还并发槽位');
+    });
+  }
 
   await t.test('每片工具参数在上游 DONE 之前立即到达，混合最终帧只交付一次', async t => {
     const h = await harness(t);
@@ -474,19 +613,23 @@ test('原生工具参数 streaming 完整 HTTP 回归', async t => {
 
   await t.test('finish=tool_calls 却没有调用时最终校验失败，不补假成功', async t => {
     const h = await harness(t);
+    const opened = deferred();
     h.set((_req, res) => {
       openSse(res);
       writeSse(res, chunk({ content: '正在准备调用。' }));
-      writeSse(res, chunk({}, 'tool_calls', USAGE));
-      endSse(res);
+      opened.resolve(res);
     });
     const client = h.open();
+    const res = await opened.promise;
+    await client.waitFor(value => value.text.includes('正在准备调用。'));
+    writeSse(res, chunk({}, 'tool_calls', USAGE));
+    endSse(res);
     await deadline(client.done);
     assert.deepEqual(argumentDeltas(client), []);
     assertStreamError(client, /不是有效 JSON/);
   });
 
-  await t.test('buffered 在上游 DONE 前保留工具参数，思考仍立即交付', async t => {
+  await t.test('buffered 在上游 DONE 前保留工具参数，思考在短暂首段窗口后交付', async t => {
     const h = await harness(t, { toolStreamMode: reloadConfig('buffered').toolStreamMode });
     const opened = deferred();
     h.set((_req, res) => { openSse(res); writeSse(res, chunk({ reasoning_content: '先确认。' })); opened.resolve(res); });

@@ -120,12 +120,15 @@ module.exports = Object.freeze({
   nonstreamTotalTimeout: numberEnv('PROXY_NONSTREAM_TOTAL_MS', 600e3), // 非流式聚合总超时(实测流式 600s 不断)
   // 默认实时交付工具参数，完整校验后才发成功收尾；旧客户端可完整缓冲。
   toolStreamMode: process.env.PROXY_TOOL_STREAM === 'buffered' ? 'buffered' : 'incremental',
+  // 尚未交付的短工具空前缀异常最多重新生成一次；不猜测或补写参数。
+  toolRetryEnabled: process.env.PROXY_TOOL_RETRY !== '0',
   upstreamJsonBodyLimit: 5 * 1024 * 1024,   // JSON 错误页/直答体上限
   upstreamSseTotalLimit: 64 * 1024 * 1024,  // 单次流总字节上限
   sseLineLimit: 1024 * 1024,       // 尾部未完成行的字节上限(防病态流内存膨胀)
 
   // 请求编码与诊断
   debugBudget: process.env.PROXY_DEBUG_BUDGET === '1', // 预算明细仅在排障时输出
+  diagnosticsEnabled: process.env.PROXY_DIAGNOSTICS === '1', // 仅显式启用故障取证
   dumpFailed: process.env.DUMP_FAILED === '1',  // 失败请求体落盘(默认关,隐私)
 
   // watch 续期调度

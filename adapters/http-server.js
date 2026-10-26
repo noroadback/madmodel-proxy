@@ -452,20 +452,26 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
     // 'close' 早已发过,新挂的 drain/close 监听器永不触发,promise 将永久挂起,
     // 该请求从此没有收尾(日志缺失、连接占住 maxConnections 名额)
     const waitDrain = () => {
-      if (clientGone || res.destroyed || res.writableEnded) return Promise.resolve();
+      if (clientGone || res.destroyed || res.writableEnded || ac.signal.aborted) {
+        return Promise.reject(new Error('流式交付已关闭'));
+      }
       return new Promise((resolve, reject) => {
         const cleanup = () => {
           res.removeListener('drain', done);
-          res.removeListener('close', done);
+          res.removeListener('close', closed);
+          res.removeListener('error', failed);
           ac.signal.removeEventListener('abort', aborted);
         };
         const done = () => { cleanup(); resolve(); };
+        const closed = () => { cleanup(); reject(new Error('流式交付已关闭')); };
+        const failed = error => { cleanup(); reject(error); };
         const aborted = () => {
           cleanup();
           reject(new Error('流式交付已取消'));
         };
         res.once('drain', done);
-        res.once('close', done);
+        res.once('close', closed);
+        res.once('error', failed);
         ac.signal.addEventListener('abort', aborted, { once: true });
         if (ac.signal.aborted) aborted();
       });
@@ -503,6 +509,9 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
         return ctx.writeSseLine(`data: ${JSON.stringify(obj)}\n\n`);
       },
       writeSseLine(line) {
+        if (clientGone || res.destroyed || res.writableEnded || ac.signal.aborted) {
+          throw new Error('流式交付已关闭');
+        }
         // Buffer.byteLength:line.length 数的是 UTF-16 码元,中文流的 KB 日志
         // 会偏小约 3 倍
         passthroughBytes += Buffer.byteLength(line);

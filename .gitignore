@@ -1,5 +1,6 @@
 # 运行时产物(诊断/状态,不入库;正常都写在状态目录里,这里逐项兜底)
 last-failed-request.json
+failure-diagnostics.jsonl*
 network-choice.json
 tunnel-revive
 *.tmp
