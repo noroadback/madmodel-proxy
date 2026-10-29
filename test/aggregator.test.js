@@ -18,11 +18,11 @@ test('聚合: content 增量拼接,空内容时为 null', () => {
   assert.strictEqual(out.choices[0].finish_reason, 'stop');
 });
 
-test('聚合: 无任何 feed 时 content 为 null 且 usage 补零', () => {
+test('聚合: 无任何 feed 时 content 与未知 usage 均为 null', () => {
   const agg = createAggregator('M');
   const out = agg.result();
   assert.strictEqual(out.choices[0].message.content, null);
-  assert.deepStrictEqual(out.usage, { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+  assert.strictEqual(out.usage, null);
   assert.strictEqual(out.model, 'M');
 });
 
@@ -61,13 +61,39 @@ test('聚合: 缺 index 的 tool_call 归并到 0', () => {
   assert.strictEqual(tc[0].function.name, 'aabb');
 });
 
-test('聚合: 无 id 无 name 的空 tool_call 从结果过滤', () => {
+test('聚合: 缺 id/name 的 tool_call 保留给交付校验，不被其他完整调用掩盖', () => {
   const agg = createAggregator('M');
-  agg.feed(delta({ tool_calls: [{ index: 0, function: { arguments: '{}' } }] }));
+  agg.feed(delta({ tool_calls: [{ index: 0, function: { arguments: '{"path":' } }] }));
   agg.feed(delta({ tool_calls: [{ index: 1, id: 'call_x', function: { name: 'real', arguments: '{}' } }] }));
   const msg = agg.result().choices[0].message;
-  assert.strictEqual(msg.tool_calls.length, 1);
-  assert.strictEqual(msg.tool_calls[0].id, 'call_x');
+  assert.strictEqual(msg.tool_calls.length, 2);
+  assert.strictEqual(msg.tool_calls[0].id, '');
+  assert.strictEqual(msg.tool_calls[0].function.name, '');
+  assert.strictEqual(msg.tool_calls[0].function.arguments, '{"path":');
+  assert.strictEqual(msg.tool_calls[1].id, 'call_x');
+});
+
+test('聚合: 错误字段类型不能经拼接或后续正常帧掩盖', () => {
+  for (const bad of [
+    { type: 'invalid-type' }, { id: 123 }, { function: [] },
+    { function: { name: 123 } }, { function: { arguments: ['{}'] } }, null,
+  ]) {
+    const agg = createAggregator('M');
+    agg.feed(delta({ tool_calls: [bad] }));
+    agg.feed(delta({ tool_calls: [{ index: 0, id: 'call_x', type: 'function',
+      function: { name: 'real', arguments: '{}' } }] }));
+    assert.strictEqual(agg.invalidToolCalls, true, JSON.stringify(bad));
+  }
+});
+
+test('聚合: 合法续帧的省略/null 字段不会被判为错误类型', () => {
+  const agg = createAggregator('M');
+  agg.feed(delta({ tool_calls: [{ index: 0, id: 'call_x', type: 'function',
+    function: { name: 'real', arguments: '{' } }] }));
+  agg.feed(delta({ tool_calls: [{ index: 0, id: null, type: null,
+    function: { name: null, arguments: '}' } }] }));
+  assert.strictEqual(agg.invalidToolCalls, false);
+  assert.strictEqual(agg.result().choices[0].message.tool_calls[0].function.arguments, '{}');
 });
 
 test('聚合: finish_reason/usage/id/model 从帧透传', () => {
@@ -86,4 +112,15 @@ test('聚合: 上游 chunk 的 model 优先于构造默认', () => {
   const quiet = createAggregator('default-m');
   const out = quiet.result();
   assert.strictEqual(out.model, 'default-m');
+});
+
+test('聚合: 同一 index 更换 ID 时拒绝串接两个调用', () => {
+  const agg = createAggregator('M');
+  agg.feed(delta({ tool_calls: [{ index: 0, id: 'call_a', function: { name: 'run', arguments: '{"value":' } }] }));
+  agg.feed(delta({ tool_calls: [{ index: 0, id: 'call_b', function: { arguments: '1}' } }] }));
+  assert.strictEqual(agg.invalidToolCalls, true);
+  assert.match(agg.invalidToolReason, /ID/);
+  const call = agg.result().choices[0].message.tool_calls[0];
+  assert.strictEqual(call.id, 'call_a');
+  assert.strictEqual(call.function.arguments, '{"value":');
 });

@@ -5,7 +5,6 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { execFileSync } = require('child_process');
 const { getEventListeners } = require('events');
-const { parseToolCalls, stripToolMarkup, shouldProbeSwallowedCall } = require('../core/dsml');
 const { translateUpstreamError } = require('../core/errors');
 const { discoverWithCredentials } = require('../core/model-discovery');
 const { createModelRegistry } = require('../core/model-registry');
@@ -13,45 +12,6 @@ const { createHttpServer, createTokenState } = require('../adapters/http-server'
 const { createUpstreamClient } = require('../core/upstream-client');
 const { createProxyService } = require('../core/proxy-service');
 const config = require('../config');
-
-const hermes = (name, body = '') => `<tool_call><function=${name}>${body}</function></tool_call>`;
-const param = (name, value) => `<parameter=${name}>\n${value}\n</parameter>`;
-const tools = [{ type: 'function', function: { name: 'Write', parameters: {
-  type: 'object', properties: { text: { type: 'string' }, n: { type: 'number' } },
-} } }];
-
-test('工具补救拒绝缺失闭合、重复参数及未提供的工具', () => {
-  for (const value of [
-    '<tool_call><function=Write></tool_call>',
-    hermes('Write', param('text', 'a') + param('text', 'b')),
-    hermes('Missing'),
-    hermes('Write') + '<tool_call><function=Write>',
-    hermes('Write', 'unparsed text'),
-  ]) assert.equal(parseToolCalls(value, tools), null, value);
-});
-
-test('引用的工具格式示例不执行也不触发重发', () => {
-  for (const quote of ['```xml\n', '~~~xml\n', '`']) {
-    const sample = quote + hermes('Write') + (quote.startsWith('~') ? '\n~~~' : quote === '`' ? '`' : '\n```');
-    assert.equal(parseToolCalls(sample, tools), null);
-    assert.equal(shouldProbeSwallowedCall(sample), false);
-  }
-});
-
-test('Hermes 按工具定义保持字符串，保留 __proto__ 参数', () => {
-  const result = parseToolCalls(hermes('Write', param('text', '123') + param('n', '5') + param('__proto__', 'true')), tools);
-  const args = JSON.parse(result[0].function.arguments);
-  assert.equal(args.text, '123');
-  assert.equal(args.n, 5);
-  assert.equal(Object.hasOwn(args, '__proto__'), true);
-  assert.equal(args.__proto__, 'true');
-});
-
-test('DSML 参数里的普通小于号不会泄漏到恢复后的正文', () => {
-  const sample = '开始\n<｜DSML｜invoke name="Write"><｜DSML｜parameter name="text">a < b</｜DSML｜parameter></｜DSML｜invoke>结束';
-  assert.equal(JSON.parse(parseToolCalls(sample, tools)[0].function.arguments).text, 'a < b');
-  assert.equal(stripToolMarkup(sample), '开始\n结束');
-});
 
 test('JSON 错误详情不能覆盖 HTTP 413 和 429', () => {
   for (const status of [413, 429]) {
@@ -156,6 +116,7 @@ test('管道一次送入两行凭据仍能完成登录输入', () => {
     require('./adapters/cli').runCli(['login']);`;
   const out = execFileSync(process.execPath, ['-e', source], {
     cwd: require('path').resolve(__dirname, '..'), input: 'sample\n fake password \n', encoding: 'utf8', timeout: 5000,
+    env: { ...process.env, MSYSTEM: '', MINGW_PREFIX: '', TERM_PROGRAM: '' },
   });
   assert.match(out, /token 已获取/);
 });

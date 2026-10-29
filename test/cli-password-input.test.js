@@ -10,7 +10,37 @@ require('../scripts/isolated-env').isolate();
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { applyPasswordKeys } = require('../adapters/cli');
+const { applyPasswordKeys, validatePasswordTerminal } = require('../adapters/cli');
+
+test('Windows 的非 TTY Git Bash 输入在读取凭据前被拒绝', () => {
+  for (const env of [{ MSYSTEM: 'MINGW64' }, { MINGW_PREFIX: '/mingw64' }, { TERM_PROGRAM: 'mintty' }]) {
+    assert.throws(() => validatePasswordTerminal('win32', false, env), /PowerShell/);
+    assert.doesNotThrow(() => validatePasswordTerminal('win32', true, env));
+    assert.doesNotThrow(() => validatePasswordTerminal('linux', false, env));
+    assert.doesNotThrow(() => validatePasswordTerminal('darwin', false, env));
+  }
+  assert.doesNotThrow(() => validatePasswordTerminal('win32', false, {}));
+  assert.doesNotThrow(() => validatePasswordTerminal('win32', false, { TERM: 'xterm-256color' }));
+});
+
+test('不安全终端的 login 不显示输入提示，也不调用认证', () => {
+  const { spawnSync } = require('node:child_process');
+  const { createTestEnv } = require('../scripts/isolated-env');
+  const source = `const auth = require('./auth-service');
+    auth.login = async () => { throw new Error('unexpected-authentication'); };
+    const cli = require('./adapters/cli');
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    cli.runCli(['login']);`;
+  const result = spawnSync(process.execPath, ['-e', source], {
+    cwd: require('node:path').resolve(__dirname, '..'),
+    env: createTestEnv(process.env.MADMODEL_STATE_DIR, { MSYSTEM: 'MINGW64' }),
+    input: 'sample\nsynthetic-password\n', encoding: 'utf8', timeout: 5000, windowsHide: true,
+  });
+  assert.strictEqual(result.status, 1, result.stderr);
+  assert.match(result.stderr, /PowerShell/);
+  assert.strictEqual(result.stdout, '');
+  assert.doesNotMatch(result.stderr, /synthetic-password|unexpected-authentication/);
+});
 
 const ESC = '\u001b';
 const CR = '\r';

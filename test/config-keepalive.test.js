@@ -41,6 +41,20 @@ test('默认上游(未设 PROXY_UPSTREAM)为隧道形态:保活派生 + tunnelMo
   assert.strictEqual(cfg.tunnelMode, true);
 });
 
+test('诊断取证默认关闭，仅 PROXY_DIAGNOSTICS=1 启用', () => {
+  const previous = process.env.PROXY_DIAGNOSTICS;
+  try {
+    for (const value of [undefined, '', '0', 'true', '1']) {
+      if (value === undefined) delete process.env.PROXY_DIAGNOSTICS;
+      else process.env.PROXY_DIAGNOSTICS = value;
+      assert.strictEqual(loadConfig(undefined).diagnosticsEnabled, value === '1');
+    }
+  } finally {
+    if (previous === undefined) delete process.env.PROXY_DIAGNOSTICS;
+    else process.env.PROXY_DIAGNOSTICS = previous;
+  }
+});
+
 test('PROXY_UPSTREAM 覆盖为校内直连域名:保活禁用,tunnelMode 关(cookie 不回传直连域)', () => {
   const cfg = loadConfig('https://madmodel.cs.tsinghua.edu.cn/v1/chat/completions');
   assert.strictEqual(cfg.keepaliveUrl, null);

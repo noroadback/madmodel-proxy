@@ -1,133 +1,107 @@
-# 局域网多机部署：madproxy + codewhale（THU-CVML 实战笔记）
+# 局域网访问
 
-把清华 madmodel（DeepSeek）经 madproxy 变成**局域网可访问、带 API Key 鉴权**的
-OpenAI 端点，多台机器（含本机笔记本）用 codewhale 接入。本文是踩过坑后的可复现流程。
+在一台电脑上运行代理，其他设备通过它调用学校服务。服务端需要 Node.js 18.14 以上和清华大学统一认证账号，推荐 Node.js 24。客户端只需要代理地址和 API Key，无需复制学校密码或 token。
 
-## 架构
+默认仍只允许本机访问。下面的设置会开放局域网连接，密钥和对话通过 HTTP 传输，请仅在可信网络使用，并在防火墙中限制来源。跨不可信网络访问时使用 HTTPS 反向代理或 SSH 隧道。每个密钥具有相同权限，共享服务端学校账户的配额和并发限制。
 
+## 启动代理
+
+在服务端按 [快速开始](../README.md#快速开始) 下载项目并运行 `npm run login`。在项目目录设置监听地址和密钥后启动。
+
+PowerShell：
+
+```powershell
+$env:PROXY_BIND_HOST = "0.0.0.0"
+$env:PROXY_API_KEYS = node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))"
+$env:PROXY_API_KEYS
+npm start
 ```
-codewhale / OpenAI 客户端
-      │  http://<机器IP>:18987/v1   Authorization: Bearer <key>
-      ▼
-madproxy (dashboard.js: proxy + watch 续期)   ← 本仓库
-      │  PROXY_BIND_HOST=0.0.0.0  PROXY_API_KEYS=<key>
-      │  PROXY_UPSTREAM=校园网直连(madmodel.cs) 或 默认 WebVPN 隧道
-      ▼
-清华 madmodel 上游
-```
 
-- **鉴权与对外监听在 madproxy 本体内实现**（`config.js` + `adapters/http-server.js`），
-  不是外挂网关。见根 README 环境变量表。
-- 非回环监听（`0.0.0.0`）时 Host 白名单让位给 API Key；回环默认行为不变。
-
-## 一次性部署（每台机器）
-
-前提：Node ≥ 18（本项目零依赖，clone 即用）、能连 GitHub（装 codewhale 二进制）。
-
-### 1. madproxy 源码
+macOS / Linux：
 
 ```sh
-mkdir -p ~/dsh-combo && cd ~/dsh-combo
-git clone https://github.com/THU-CVML/madmodel-proxy.git
+export PROXY_BIND_HOST=0.0.0.0
+export PROXY_API_KEYS="$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))")"
+printf '%s\n' "$PROXY_API_KEYS"
+npm start
 ```
 
-### 2. 凭据（跨机复制，不必每台重新 login）
+把生成的密钥填入客户端，不要公开终端截图。重新执行生成命令会更换密钥，客户端也要同步更新。仅需保护本机访问时，把监听地址改为 `127.0.0.1`。
 
-凭据是**机器绑定加密**的（Linux: `/etc/machine-id` + uid 派生 AES-256-GCM），
-直接拷 `~/.madmodel-proxy/*.json` 到别的机器解不开。正确做法是**明文中转 + 目标机重新加密**：
+首次启动按提示选择校园网或 WebVPN。也可运行 `npm start -- campus` 或 `npm start -- offcampus`。显式设置的 `PROXY_UPSTREAM` 优先于网络选项；要切回内置网络选择，先清除该变量。
 
-```sh
-# 在已有凭据的源机(如 22)导出:
-node -e 'const c=require("./platform/credentials");const a=c.readAccount(),t=c.readToken();
-  require("fs").writeFileSync("/tmp/xfer.json",JSON.stringify({account:a,token:t}),{mode:0o600})'
-# 拷 /tmp/xfer.json 到目标机(经共享盘或 scp),然后在目标机:
-node -e 'const c=require("./platform/credentials");const x=require("/tmp/xfer.json");
-  c.writeAccount(x.account.username,x.account.password,x.account.fingerPrint);
-  if(x.token)c.writeToken(x.token.token,x.token.expiresAt,x.token.cookie)'
-shred -u /tmp/xfer.json   # 用完抹除明文
-```
+`0.0.0.0` 监听所有 IPv4 网卡，也可填写服务端的某个网卡 IP。IPv6 可用 `::`，客户端 URL 中的 IPv6 地址需带方括号。非回环监听未配置有效密钥时，代理会拒绝启动。
 
-> **单会话陷阱**：同一学号的 WebVPN 会话是**单点**的——多台机器同时跑 watch 续期
-> 会互相把对方会话踢掉，症状是「聊一会儿就 502」。**一个学号只在一台机器跑**，
-> 或每台配独立学号。（2026-09 实测，见 project_history。）
+## 连接客户端
 
-### 3. API Key
-
-```sh
-mkdir -p ~/.madmodel-proxy
-printf 'madk-%s\n' "$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" > ~/.madmodel-proxy/api-keys
-chmod 600 ~/.madmodel-proxy/api-keys
-```
-
-### 4. 启动（幂等脚本）
-
-```sh
-cd ~/dsh-combo/madmodel-proxy
-./scripts/service.sh start      # 默认: 0.0.0.0:18987 + key(读上面文件) + 校园网直连
-./scripts/service.sh status
-./scripts/service.sh restart
-./scripts/service.sh stop
-```
-
-对外监听但没配 key 时脚本**拒绝启动**（防裸奔）。覆盖用环境变量：
-`MADPROXY_PORT` / `MADPROXY_BIND` / `MADPROXY_API_KEYS` / `MADPROXY_UPSTREAM`
-（`MADPROXY_UPSTREAM=tunnel` 走 WebVPN；默认校园网直连 madmodel.cs）。
-
-## codewhale 接入（含本机笔记本走局域网）
-
-### 装二进制
-
-```sh
-npm install -g codewhale        # 下载平台二进制并按 sha256 校验
-```
-
-> GitHub 慢时（校内节点实测 ~50KB/s）：`CODEWHALE_DISABLE_INSTALL=1 npm i -g codewhale`
-> 先装壳，再把别处校验过的同版本二进制拷进
-> `~/.npm-global/lib/node_modules/codewhale/bin/downloads/{codewhale,codew}`（sha256 需与
-> release 的 `codewhale-artifacts-sha256.txt` 一致），写 `codewhale.version`/`codew.version`
-> 后 `codewhale --version` 会自动 adopt，不再联网。
-
-### 配置（关键：用命名 provider，避开环境变量冲突）
-
-**坑**：若用 `provider = "openai"`，codewhale 会被 shell 里已有的
-`OPENAI_BASE_URL` / `OPENAI_API_KEY` 环境变量劫持（本机指向 ebill 就会连错端点，
-报 `Custom endpoint credentials must be bound explicitly`）。**用自定义命名 provider +
-内联 api_key** 绕开：
-
-```toml
-# ~/.codewhale/config.toml
-provider = "thu88"
-
-[providers.thu88]
-kind = "openai-compatible"
-base_url = "http://10.103.10.88:18987/v1"   # 88 的局域网地址
-model = "DeepSeek-V4-Flash-0731"
-context_window = 262144
-api_key = "madk-...."                          # 与 88 上 ~/.madmodel-proxy/api-keys 一致
-```
-
-回环 http 需要 `export DEEPSEEK_ALLOW_INSECURE_HTTP=1`（非回环 http 亦然）。
-
-### 验证
-
-```sh
-codewhale --version
-codewhale exec "只回复五个字:本机连通88"      # 通则回你要的话
-```
-
-## 排障速查
-
-| 症状 | 原因 / 处理 |
+| 配置项 | 填写方式 |
 |---|---|
-| 聊一会儿就 502「上游返回无法识别的响应」 | WebVPN 隧道会话被同学号别处登录踢掉。**一学号一机**，或改校园网直连 `MADPROXY_UPSTREAM`(默认已直连) |
-| codewhale 报 `credentials must be bound explicitly` 且 URL 是 ebill | 被 `OPENAI_BASE_URL` 环境变量劫持。改用命名 provider + 内联 `api_key`(见上) |
-| 413「请求体超过上限」 | body > 950KB(nginx 1MB 硬限)。这是字节上限不是 token 上限；5.4 万 token 实测正常 |
-| 对外 curl `000` 无响应 | 检查 `PROXY_BIND_HOST=0.0.0.0`(默认 127.0.0.1 仅本机);`ss -tlnp | grep 18987` 看实际绑定 |
-| `timeout node ...` 报 EPERM | 某些节点有 seccomp guard。别用 timeout 包 node,直接跑 |
-| WebVPN 登录反复「未见会话」 | 短时高频登录触发频控,或触发二次认证。停手冷却,交互式 `node refresh-token.js login` 走验证码 |
+| API 类型 | OpenAI Chat Completions |
+| Base URL | `http://服务端局域网IP:8080/v1`，端口按实际配置填写 |
+| API Key | 服务端刚生成的密钥 |
+| 模型 | 获取列表后选择，或参考 [模型配置](../README.md#模型配置) 手填 ID |
 
-## 上下游端口约定（本部署）
+请求使用 `Authorization: Bearer <key>`，也支持 `x-api-key`。同时存在时以 Authorization 为准，格式错误不会回退。密钥放在 URL 查询参数中无效。浏览器地址栏不能附带密钥，开启鉴权后请在客户端获取模型列表；网页客户端需要同源代理，本服务不开放 CORS。
 
-- madproxy 对外：`0.0.0.0:18987`
-- 88 局域网地址：`http://10.103.10.88:18987/v1`
-- `GET /healthz` 恒免鉴权，回 `ok`，供探活/Makefile 用
+`PROXY_API_KEYS` 可填写多个逗号分隔的密钥，便于分发和轮换。更改后重启服务。它们只控制代理访问，不会修改学校登录凭据。
+
+`GET /healthz` 无需密钥，只返回 `{"status":"ok","proxy":"madmodel"}`，表示代理进程可以响应，不代表已登录或上游可用。运行 `npm run status` 时使用与服务端相同的监听地址、端口和状态目录设置。
+
+## Linux 后台运行
+
+使用 systemd 用户服务管理代理和续期进程。下面假设项目在 `~/madmodel-proxy`，登录、服务运行和状态查询使用同一系统账户。先在前台确认能够使用，再按 Ctrl+C 停止。
+
+在刚才设置密钥的终端保存配置。文件包含代理密钥，仅当前账户可读。
+
+```sh
+mkdir -p ~/.config/madmodel-proxy ~/.config/systemd/user
+umask 077
+test -n "$PROXY_API_KEYS" && printf 'PROXY_BIND_HOST=%s\nPROXY_API_KEYS=%s\n' \
+  "$PROXY_BIND_HOST" "$PROXY_API_KEYS" > ~/.config/madmodel-proxy/service.env
+chmod 600 ~/.config/madmodel-proxy/service.env
+command -v node
+```
+
+将以下内容保存为 `~/.config/systemd/user/madmodel-proxy.service`，把 `/usr/bin/node` 和项目目录替换为实际路径。
+
+```ini
+[Unit]
+Description=madmodel proxy
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=%h/madmodel-proxy
+EnvironmentFile=%h/.config/madmodel-proxy/service.env
+UnsetEnvironment=PROXY_UPSTREAM
+ExecStart=/usr/bin/node %h/madmodel-proxy/dashboard.js offcampus
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target
+```
+
+该示例明确使用 WebVPN，并清除继承的 `PROXY_UPSTREAM`。校园网内需要直连时，将 `offcampus` 改为 `campus`。其他自定义配置可加入 `service.env`；需要自定义上游时，还应删除 `UnsetEnvironment` 这一行。
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now madmodel-proxy
+systemctl --user status madmodel-proxy
+journalctl --user -u madmodel-proxy -f
+```
+
+停止用 `systemctl --user stop madmodel-proxy`，重启用 `systemctl --user restart madmodel-proxy`。systemd 只管理该服务的进程组，无需按端口查找并终止进程。需要退出登录后继续运行或开机启动时，由管理员为该账户启用 linger。
+
+## 排查连接问题
+
+| 现象 | 处理方式 |
+|---|---|
+| 连接被拒绝或超时 | 确认监听地址、客户端 IP 和端口，检查防火墙是否允许该客户端 |
+| API Key 缺失或无效 | 核对客户端密钥与服务端当前配置；更换密钥后双方都要更新 |
+| 模型列表可读，但对话失败 | 检查学校登录状态与上游报错，见 [常见问题](../README.md#常见问题) |
+| 429 | 降低并发或稍后重试；多个密钥不会增加学校配额 |
+| 修改网络选项后仍走旧地址 | 检查是否设置了优先级更高的 `PROXY_UPSTREAM` |

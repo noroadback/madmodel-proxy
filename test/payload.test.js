@@ -5,7 +5,8 @@ require('../scripts/isolated-env').isolate();
 
 const test = require('node:test');
 const assert = require('node:assert');
-const { parseJsonBody, normalizePayload, fitTokenBudget, CONTEXT_RESERVE_TOKENS } = require('../core/payload');
+const { parseJsonBody, normalizePayload, fitTokenBudget, estimatePromptBudget,
+  CONTEXT_RESERVE_TOKENS } = require('../core/payload');
 
 const MODEL = 'DeepSeek-V4-Flash-0731';
 
@@ -17,6 +18,30 @@ test('parseJsonBody: 合法 JSON 对象返回原对象', () => {
 
 test('parseJsonBody: 非 JSON 抛 INVALID_JSON', () => {
   assert.throws(() => parseJsonBody(Buffer.from('not json')), e => e.code === 'INVALID_JSON');
+});
+
+test('parseJsonBody: 非法 UTF-8 不会替换后转发为合法对话', () => {
+  const invalidBodies = [
+    Buffer.concat([Buffer.from('{"messages":[{"content":"'), Buffer.from([0xff]), Buffer.from('"}]}')]),
+    Buffer.concat([Buffer.from('{"content":"'), Buffer.from([0xe4, 0xbd])]),
+  ];
+  for (const body of invalidBodies) {
+    assert.throws(() => parseJsonBody(body), e => e.code === 'INVALID_UTF8' && /UTF-8/.test(e.message));
+  }
+  const valid = { content: '中文与 emoji 😀、客户端实际写入的替换字符 �' };
+  assert.deepStrictEqual(parseJsonBody(Buffer.from(JSON.stringify(valid))), valid);
+});
+
+test('parseJsonBody: 解析错误不回显请求正文，仅保留类别与位置', () => {
+  const marker = 'PRIVATE-PROMPT-CONTENT';
+  for (const source of [marker, `"${marker}" trailing`, `{"content":"${marker}`]) {
+    assert.throws(() => parseJsonBody(Buffer.from(source)), e => {
+      assert.strictEqual(e.code, 'INVALID_JSON');
+      assert.ok(!e.message.includes(marker));
+      assert.match(e.message, /^请求体不是合法 JSON: (语法无效|字符串未闭合|内容未完成)(（位置 \d+）)?$/);
+      return true;
+    });
+  }
 });
 
 test('parseJsonBody: 数组/null/标量抛 INVALID_PAYLOAD', () => {
@@ -278,7 +303,7 @@ test('思考方言: 原生 enable_thinking=false 也被识别为关闭', () => {
   assert.ok(!('enable_thinking' in p));
 });
 
-// ---- fitTokenBudget:预检门的精确收缩(上游规则 prompt+max_tokens ≤ 262,144) ----
+// ---- fitTokenBudget:文本预算预检与输出收缩 ----
 test('预算适配: 未超限不改不注记', () => {
   const p = { max_tokens: 4096 };
   const r = fitTokenBudget(100000, p, 262144);
@@ -307,8 +332,7 @@ test('预算适配: 剩余空间 <512 判 413(prompt 本身超限)', () => {
   const p = { max_tokens: 65536 };
   const r = fitTokenBudget(262000, p, 262144);
   assert.strictEqual(r.ok, false);
-  assert.ok(r.message.includes('262000'));
-  assert.ok(r.message.includes('512'));
+  assert.strictEqual(r.message, '对话内容过长，请缩短对话或新建会话后重试。');
 });
 
 test('预算适配: max_tokens 缺省且 prompt 未超限 → 不注入不收缩', () => {
@@ -440,7 +464,7 @@ test('预算适配: 工具多到放不下最小预算时仍判 413', () => {
   const p = { max_tokens: 100, tools: toolsN(33) };
   const r = fitTokenBudget(262000, p, 262144);
   assert.strictEqual(r.ok, false);
-  assert.ok(r.message.includes('上下文上限'));
+  assert.ok(r.message.includes('缩短对话'));
 });
 
 test('预算适配: TOOL_DEF_TOKENS 覆盖实测斜率上界', () => {
@@ -465,6 +489,106 @@ test('预算适配: DSH 的 57 工具历史请求不再超过真实上游窗口'
 // 恰好撞墙,请求必然失败(错误文案还误导成"上游忙")。
 // 实测边界(经代理逐值探测,本地 prompt=5 时):262103 ✅ / 262104 ❌
 const config = require('../config');
+
+test('Qwen 长文本校准样本的输出预算为实际输入保留空间', () => {
+  // 2026-10-10 合成英文长文本：本地 62,017，上游 70,917。
+  const limits = config.limitsFor('qwen3.8-27b');
+  const payload = { max_tokens: limits.maxOutputTokens };
+  const budget = estimatePromptBudget(payload, 62017, limits.promptTokenMarginRatio);
+  assert.strictEqual(fitTokenBudget(62017, payload, limits.contextWindow, budget).ok, true);
+  assert.ok(70917 + payload.max_tokens < limits.contextWindow);
+  assert.ok(payload.max_tokens > 180000, '只收缩估算余量，不设置固定的小输出上限');
+
+  const ds = { max_tokens: 1048576 };
+  const dsLimits = config.limitsFor('DeepSeek-V4.1-Flash');
+  const dsBudget = estimatePromptBudget(ds, 62017, dsLimits.promptTokenMarginRatio);
+  fitTokenBudget(62017, ds, dsLimits.contextWindow, dsBudget);
+  assert.strictEqual(ds.max_tokens, 1048576 - 62017 - CONTEXT_RESERVE_TOKENS);
+});
+
+test('未知图片只占软预算，不改变文本硬余量或注入缺省输出', () => {
+  const text = { max_tokens: 262000, messages: [{ role: 'user', content: 'hi' }] };
+  const images = { max_tokens: 262000, messages: [{ role: 'user', content: [
+    { type: 'text', text: 'hi' },
+    { type: 'image_url', image_url: { url: 'data:image/png;base64,fixture' } },
+    { type: 'image_url', image_url: { url: 'https://example.invalid/image.png' } },
+  ] }] };
+  const textBudget = estimatePromptBudget(text), imageBudget = estimatePromptBudget(images);
+  assert.strictEqual(textBudget.reserveTokens, CONTEXT_RESERVE_TOKENS);
+  assert.strictEqual(imageBudget.reserveTokens, textBudget.reserveTokens);
+  assert.strictEqual(imageBudget.imageTokensEstimate, 32768);
+  assert.strictEqual(imageBudget.unknownImageCount, 2);
+  const fitted = fitTokenBudget(21, images, 262144);
+  assert.strictEqual(fitted.ok, true);
+  fitTokenBudget(21, text, 262144);
+  assert.strictEqual(images.max_tokens, text.max_tokens - 32768);
+  assert.strictEqual(images.max_tokens, 262144 - 21 - CONTEXT_RESERVE_TOKENS - 32768);
+  delete images.max_tokens;
+  assert.strictEqual(fitTokenBudget(21, images, 262144).ok, true);
+  assert.ok(!Object.hasOwn(images, 'max_tokens'));
+});
+
+// Valid synthetic 910×1287 grayscale PNG, matching the dimensions in issue #7.
+const screenshot = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAA44AAAUHAQAAAAA94wETAAAApklEQVR4nO3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAuDFCQwABfEkFbwAAAABJRU5ErkJggg==';
+function imageMessages(count) {
+  return [{ role: 'user', content: Array.from({ length: count }, () => ({
+    type: 'image_url', image_url: { url: screenshot },
+  })) }];
+}
+
+test('图片公式与软余量独立于工具、模板和文本硬余量', () => {
+  const budget = estimatePromptBudget({ model: 'DeepSeek-V4.1-Flash',
+    tools: toolsN(33), messages: imageMessages(2) }, 101, 0.15);
+  assert.deepStrictEqual(budget, { baseReserveTokens: 1024, toolReserveTokens: 660,
+    marginTokens: 16, reserveTokens: 1700, imageCount: 2, imageTokensEstimate: 1430,
+    imageMarginTokens: 16, dimensionImageCount: 2, unknownImageCount: 0, imageEstimateSource: 'dimensions' });
+});
+
+test('issue #7：430066 文本 token、49 个工具和40张截图不再被图片预留误拒', () => {
+  const payload = { model: 'DeepSeek-V4.1-Flash', max_tokens: 1048576,
+    tools: toolsN(49), messages: imageMessages(40) };
+  const before = JSON.stringify(payload.messages);
+  const budget = estimatePromptBudget(payload, 430066);
+  assert.strictEqual(budget.reserveTokens, 2004);
+  assert.strictEqual(budget.imageTokensEstimate, 28600);
+  assert.strictEqual(budget.imageMarginTokens, 320);
+  assert.strictEqual(fitTokenBudget(430066, payload, 1048576, budget).ok, true);
+  assert.strictEqual(payload.max_tokens, 587586);
+  assert.strictEqual(JSON.stringify(payload.messages), before, '图片内容完整保留');
+});
+
+test('63 张图现场回归：104394 文本 token 与 33 个工具不再因图片估值被拒绝', () => {
+  const payload = { max_tokens: 384000, tools: toolsN(33), messages: imageMessages(63) };
+  const budget = estimatePromptBudget(payload, 104394);
+  assert.strictEqual(budget.reserveTokens, 1684);
+  const fitted = fitTokenBudget(104394, payload, 1048576, budget);
+  assert.strictEqual(fitted.ok, true);
+  assert.strictEqual(payload.max_tokens, 384000);
+});
+
+test('64 张图不注入缺省预算，也不提高显式小预算', () => {
+  for (const extra of [{}, { max_tokens: 4096 }, { max_tokens: 16, thinking: false }]) {
+    const payload = { messages: imageMessages(64), ...extra };
+    const fitted = fitTokenBudget(21, payload, 1048576);
+    assert.strictEqual(fitted.ok, true);
+    assert.strictEqual(payload.max_tokens, extra.max_tokens);
+    assert.strictEqual(Object.hasOwn(payload, 'max_tokens'), Object.hasOwn(extra, 'max_tokens'));
+  }
+});
+
+test('含图请求仍按文字和工具收缩；文字本身超限仍拒绝', () => {
+  const context = 32768;
+  const payload = { messages: imageMessages(1), tools: toolsN(33), max_tokens: 4096 };
+  const reserve = CONTEXT_RESERVE_TOKENS + 33 * TOOL_DEF_TOKENS;
+  const fitted = fitTokenBudget(context - reserve - 1000, payload, context);
+  assert.strictEqual(fitted.ok, true);
+  assert.strictEqual(payload.max_tokens, 1000);
+  for (const off of [false, true]) {
+    const rejected = { ...payload, max_tokens: 4096, thinking: !off };
+    const room = off ? 0 : 511;
+    assert.strictEqual(fitTokenBudget(context - reserve - room, rejected, context).ok, false);
+  }
+});
 
 test('逐模型上限: qwen 的值必须低于实测撞墙值 262104', () => {
   const lim = config.limitsFor('qwen3.8-27b');

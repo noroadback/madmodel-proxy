@@ -15,6 +15,7 @@ const os = require('os');
 const path = require('path');
 const net = require('net');
 const http = require('http');
+const { listenTestHttp } = require('../scripts/listen-test-http');
 
 const STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-it-'));
 process.env.MADMODEL_STATE_DIR = STATE_DIR;
@@ -26,7 +27,7 @@ process.env.PROXY_TOKEN_FILE = TOKEN_FILE;
 // 隧道形态验证(生产中该路径只在默认隧道上游下可达)
 process.env.PROXY_RETRY_WAIT_MS = '2000';
 process.env.MADMODEL_FORCE_TUNNEL_MODE = '1';
-// 空闲守卫压到 1.2s(默认 65s 见 config.streamIdleTimeout):R3 的背压回归
+// 空闲守卫压到 1.2s(默认值见 config.streamIdleTimeout):R3 的背压回归
 // 用例要靠"停读时长 > 阈值"来验证守卫不把背压静默计入上游空闲,1.2s 让
 // 用例秒级完成。其余用例的替身上游都是即时应答,不受此阈值影响
 process.env.PROXY_IDLE_MS = '1200';
@@ -35,30 +36,22 @@ const test = require('node:test');
 const assert = require('node:assert');
 
 // ---- mock 上游(可编程响应) ----
-function startMockUpstream() {
+async function startMockUpstream() {
   let handler = null;
   const server = http.createServer((req, res) => {
     if (handler) return handler(req, res);
     res.writeHead(500, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: { message: 'mock 未配置 handler' } }));
   });
-  return new Promise(resolve => {
-    server.listen(0, '127.0.0.1', () => resolve({
-      server,
-      port: server.address().port,
-      set: h => { handler = h; },
-    }));
-  });
+  const port = await listenTestHttp(server);
+  return { server, port, set: h => { handler = h; } };
 }
 
-function freePort() {
-  return new Promise(resolve => {
-    const srv = net.createServer();
-    srv.listen(0, '127.0.0.1', () => {
-      const { port } = srv.address();
-      srv.close(() => resolve(port));
-    });
-  });
+async function freePort() {
+  const srv = net.createServer();
+  const port = await listenTestHttp(srv);
+  await new Promise(resolve => srv.close(resolve));
+  return port;
 }
 
 // mock 上游的 SSE 应答助手
@@ -111,7 +104,7 @@ test('上游错误判定集成矩阵(mock 上游 + 完整代理实例)', async t
   };
 
   try {
-    await t.test('流式与非流式的完成日志显示首字等待和均速', async () => {
+    await t.test('流式和非流式聚合均显示上游观察到的输出阶段速度', async () => {
       const lines = [];
       const originalLog = console.log;
       console.log = (...args) => lines.push(args.join(' '));
@@ -121,8 +114,11 @@ test('上游错误判定集成矩阵(mock 上游 + 完整代理实例)', async t
             res.writeHead(200, { 'content-type': 'text/event-stream' });
             res.write(`data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant' } }] })}\n\n`);
             setTimeout(() => {
-              res.end(`data: ${JSON.stringify(CH)}\n\ndata: ${JSON.stringify(USAGE)}\n\ndata: [DONE]\n\n`);
+              res.write(`data: ${JSON.stringify(CH)}\n\n`);
             }, 20);
+            setTimeout(() => {
+              res.end(`data: ${JSON.stringify(CH)}\n\ndata: ${JSON.stringify(USAGE)}\n\ndata: [DONE]\n\n`);
+            }, 220);
           });
           assert.strictEqual((await chat(stream)).status, 200);
         }
@@ -131,8 +127,68 @@ test('上游错误判定集成矩阵(mock 上游 + 完整代理实例)', async t
       assert.strictEqual(completed.length, 2);
       for (const line of completed) {
         assert.match(line, /首字 \d+\.\ds/);
-        assert.match(line, /均速 \d+\.\d tok\/s/);
+        assert.doesNotMatch(line, /均速/);
       }
+      assert.match(completed[0], /输出 \d+\.\d tok\/s/);
+      assert.match(completed[1], /输出 \d+\.\d tok\/s/);
+    });
+
+    await t.test('单帧内容到终止帧有正间隔就显示速度', async () => {
+      const lines = [];
+      const originalLog = console.log;
+      console.log = (...args) => lines.push(args.join(' '));
+      try {
+        mock.set((_req, res) => {
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          res.write(`data: ${JSON.stringify(CH)}\n\n`);
+          setTimeout(() => res.end(`data: ${JSON.stringify(USAGE)}\n\ndata: [DONE]\n\n`), 150);
+        });
+        assert.strictEqual((await chat(true)).status, 200);
+      } finally { console.log = originalLog; }
+      assert.match(lines.find(line => line.includes('token 1/1')), /首字 \d+\.\ds · 输出 \d+\.\d tok\/s/);
+    });
+
+    await t.test('上游JSON回退不伪造首字或输出速度', async () => {
+      const lines = [];
+      const originalLog = console.log;
+      console.log = (...args) => lines.push(args.join(' '));
+      try {
+        mock.set((_req, res) => {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' },
+            finish_reason: 'stop' }], usage: USAGE.usage }));
+        });
+        for (const stream of [true, false]) assert.strictEqual((await chat(stream)).status, 200);
+      } finally { console.log = originalLog; }
+      const completed = lines.filter(line => line.includes('token 1/1'));
+      assert.strictEqual(completed.length, 2);
+      for (const line of completed) assert.match(line, /首字 — · 输出 —/);
+    });
+
+    await t.test('首字从HTTP入口计时，慢速上传不会被统计起点漏掉', async () => {
+      const lines = [];
+      const originalLog = console.log;
+      console.log = (...args) => lines.push(args.join(' '));
+      try {
+        mock.set((_req, res) => sse(res, [JSON.stringify(CH), JSON.stringify(USAGE)]));
+        const body = Buffer.from(JSON.stringify({ model: 'DeepSeek-V4.1-Flash',
+          messages: [{ role: 'user', content: 'ok' }], max_tokens: 512, stream: true }));
+        await new Promise((resolve, reject) => {
+          const req = http.request(proxyUrl, { method: 'POST', headers: {
+            'content-type': 'application/json', 'content-length': body.length,
+          } }, res => {
+            assert.strictEqual(res.statusCode, 200);
+            res.resume();
+            res.on('end', resolve);
+            res.on('error', reject);
+          });
+          req.on('error', reject);
+          req.write(body.subarray(0, 1));
+          setTimeout(() => req.end(body.subarray(1)), 220);
+        });
+      } finally { console.log = originalLog; }
+      const firstSeconds = /首字 (\d+\.\d)s/.exec(lines.find(line => line.includes('token 1/1')))?.[1];
+      assert.ok(Number(firstSeconds) >= 0.2, '首字等待必须包含请求体上传时间');
     });
 
     await t.test('双思考字段经工具流缓冲与非流式交付后均不重复', async () => {
@@ -200,6 +256,60 @@ test('上游错误判定集成矩阵(mock 上游 + 完整代理实例)', async t
       assert.notStrictEqual(r.status, 200);
       assert.strictEqual(r.json.error.code, 502);
       assert.ok(r.json.error.message.includes('busy'));
+    });
+
+    await t.test('真实 HTTP 400 上下文错误回放: 两种客户端模式均返回标准超限错误', async () => {
+      // 2026-10-15 直连上游实测的两种校验路径，原文只含合成样本的数量。
+      const messages = [
+        "This model's maximum context length is 1048576 tokens. However, you requested 1048576 output tokens and your prompt contains 89 characters (more than 0 characters, which is the upper bound for 0 input tokens). Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_text, value=89)",
+        "This model's maximum context length is 1048576 tokens. However, you requested 1047552 output tokens and your prompt contains at least 1025 input tokens, for a total of at least 1048577 tokens. Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_tokens, value=1025)",
+        "This model's maximum context length is 262144 tokens. However, you requested 262144 output tokens and your prompt contains 108 characters (more than 0 characters, which is the upper bound for 0 input tokens). Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_text, value=108)",
+      ];
+      for (const message of messages) {
+        for (const stream of [true, false]) {
+          let hits = 0;
+          mock.set((req, res) => {
+            hits++;
+            res.writeHead(400, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ error: { message, type: 'BadRequestError',
+              param: message.includes('parameter=input_tokens') ? 'input_tokens' : 'input_text', code: 400 } }));
+          });
+          const r = await chat(stream);
+          assert.strictEqual(r.status, 400);
+          assert.strictEqual(r.json.error.type, 'invalid_request_error');
+          assert.strictEqual(r.json.error.code, 'context_length_exceeded');
+          assert.ok(r.json.error.message.includes(message));
+          assert.strictEqual(hits, 1, '明确参数错误不应触发重试');
+        }
+      }
+    });
+
+    await t.test('HTTP 400 max_tokens 参数错误: 保留 400 与原文，不误报上下文超限', async () => {
+      for (const stream of [true, false]) {
+        const message = 'max_tokens must be greater than 0';
+        mock.set((req, res) => {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: { message, type: 'BadRequestError', param: 'max_tokens', code: 400 } }));
+        });
+        const r = await chat(stream);
+        assert.strictEqual(r.status, 400);
+        assert.strictEqual(r.json.error.type, 'invalid_request_error');
+        assert.strictEqual(r.json.error.code, 400);
+        assert.ok(r.json.error.message.includes(message));
+      }
+    });
+
+    await t.test('200 SSE 内嵌标准上下文错误: 两种客户端模式均传递 type 和 code', async () => {
+      for (const stream of [true, false]) {
+        mock.set((req, res) => sse(res, [JSON.stringify({ error: {
+          message: 'context overflow', type: 'invalid_request_error', code: 'context_length_exceeded',
+        } })]));
+        const r = await chat(stream);
+        assert.strictEqual(r.status, 400);
+        assert.strictEqual(r.json.error.type, 'invalid_request_error');
+        assert.strictEqual(r.json.error.code, 'context_length_exceeded');
+        assert.ok(r.json.error.message.includes('context overflow'));
+      }
     });
 
     await t.test('200 SSE 内嵌标准 error 对象帧: 翻译为 5xx 错误,不进聚合', async () => {

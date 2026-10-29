@@ -10,7 +10,7 @@ require('../scripts/isolated-env').isolate();
 // 环境注入必须在 require config/paths 之前(加载期读取)。
 // 本文件全程用 mock 上游,**不得依赖真实 token**——否则 token 一过期,
 // 代理会在到达 mock 之前就回 401,测试失败却与路由无关(2026-09-28 实际踩到:
-// 真实 token 过期 187 分钟导致 8 条用例全红)。与 toolcall-fix.test.js 同法
+// 真实 token 过期 187 分钟导致 8 条用例全红)。与 toolcall-delivery.test.js 同法
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -180,7 +180,7 @@ test('按客户端选择路由:三个模型各发各的,不再被改写成单一
       }
     });
 
-    await t.test('逐模型输出上限:1M 的模型不被压到 65536,qwen 收到自己的 262144', async () => {
+    await t.test('逐模型输出上限：DeepSeek 保留大预算，Qwen 常规请求按流式预算适配', async () => {
       got = [];
       await chat('DeepSeek-V4.1-Flash');
       // 客户端发 900000:1M 窗口内应原样放行
@@ -191,12 +191,35 @@ test('按客户端选择路由:三个模型各发各的,不再被改写成单一
       assert.strictEqual(got[0].max_tokens, 900000, '1M 模型不得被压到 65536');
       assert.strictEqual(got[0].model, 'DeepSeek-V4.1-Flash');
 
-      // qwen 窗口 262144:超出的部分应被压到 ≤262144
-      got = [];
-      await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ model: 'qwen3.8-27b', messages: [{ role: 'user', content: 'hi' }], stream: true, max_tokens: 900000 }) })
-        .then(r => r.text());
-      assert.ok(got[0].max_tokens <= 262144, `qwen 应被收到窗口内,实际 ${got[0].max_tokens}`);
+      for (const stream of [true, false]) {
+        got = [];
+        const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ model: 'qwen3.8-27b', messages: [{ role: 'user', content: 'hi' }], stream, max_tokens: 900000 }) });
+        await r.text();
+        assert.strictEqual(r.status, 200);
+        assert.strictEqual(got[0].stream, true);
+        assert.ok(got[0].max_tokens <= 262000, `qwen 应收缩到模型预算内，实际 ${got[0].max_tokens}`);
+        assert.ok(got[0].max_tokens > 131072, '客户端选非流式也不应套用上游非流式上限');
+      }
+    });
+
+    await t.test('R1 保留已接受的 160000 输出预算，过大预算按共享窗口收缩', async () => {
+      for (const maxTokens of [160000, 900000]) {
+        got = [];
+        const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ model: 'DeepSeek-R1-W8A8', messages: [{ role: 'user', content: 'hi' }],
+            stream: true, max_tokens: maxTokens }) });
+        await r.text();
+        assert.strictEqual(r.status, 200);
+        assert.strictEqual(got.length, 1);
+        assert.strictEqual(got[0].model, 'DeepSeek-R1-W8A8');
+        if (maxTokens === 160000) {
+          assert.strictEqual(got[0].max_tokens, 160000, '不得再压到默认模型的 65536');
+        } else {
+          assert.ok(got[0].max_tokens > 160000);
+          assert.ok(got[0].max_tokens < 163840 - 1024, '共享窗口须扣除输入及通用预留量');
+        }
+      }
     });
 
     await t.test('/v1/models 按模型发布各自窗口(不再是一个统一值)', async () => {
@@ -205,6 +228,9 @@ test('按客户端选择路由:三个模型各发各的,不再被改写成单一
       const byId = Object.fromEntries(j.data.map(m => [m.id, m]));
       assert.strictEqual(byId['DeepSeek-V4.1-Flash'].context_window, 1048576);
       assert.strictEqual(byId['qwen3.8-27b'].context_window, 262144);
+      assert.strictEqual(byId['qwen3.8-27b'].max_output_tokens, 262000);
+      assert.strictEqual(byId['DeepSeek-R1-W8A8'].context_window, 163840);
+      assert.strictEqual(byId['DeepSeek-R1-W8A8'].max_output_tokens, 163840);
       // 三者窗口不该全都相同(那就是旧的单一值行为)
       const wins = new Set(j.data.map(m => m.context_window));
       assert.ok(wins.size > 1, '不同模型的窗口应各不相同,实际:' + [...wins].join(','));

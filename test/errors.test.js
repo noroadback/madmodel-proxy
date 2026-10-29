@@ -67,7 +67,8 @@ test('复判: prompt+max_tokens 超上限 → 413 疑似上下文超限', () => 
   const m = translateUpstreamError(BUSY, '', 200, hintOver);
   assert.strictEqual(m.http, 413);
   assert.ok(m.message.includes('上下文超限'));
-  assert.ok(m.message.includes('240000'));
+  assert.match(m.message, /缩短对话或调低输出上限/);
+  assert.doesNotMatch(m.message, /240000|65536|262144|本地估算|预算/);
 });
 
 test('复判: prompt 未超上限(短小请求) → 保持 429 真繁忙', () => {
@@ -91,17 +92,18 @@ test('复判: 恰等于上限不算超限(上游 > 才拒)', () => {
   assert.strictEqual(m.http, 429);
 });
 
-test('复判: 接近估算边界给出预算建议，真实 HTTP 限流仍优先', () => {
+test('复判: 接近估算边界只给处理建议，真实 HTTP 限流仍优先', () => {
   const hint = { promptTokens: 47860, tokenBudget: 999692, contextWindow: 1048576, reserveTokens: 1024 };
   for (const body of [BUSY, { status: 10001, message: '服务器繁忙' }]) {
     const mapped = translateUpstreamError(body, '', 200, hint);
     assert.strictEqual(mapped.http, 429, '估算不能证明实际超限');
-    assert.ok(mapped.message.includes('降低 max_tokens'));
+    assert.ok(mapped.message.includes('调低输出上限'));
+    assert.doesNotMatch(mapped.message, /预算|估算|47860|999692|1048576/);
     assert.ok(!mapped.message.includes('疑似上下文超限'));
   }
   const limited = translateUpstreamError(BUSY, '', 429, hint);
   assert.ok(limited.message.includes('HTTP 429'));
-  assert.ok(!limited.message.includes('降低 max_tokens'));
+  assert.ok(!limited.message.includes('调低输出上限'));
 });
 
 // ---- 10001 复判:结构化状态码与"繁忙"文案同族(2026-09-16 补齐,此前该分支
@@ -128,10 +130,97 @@ test('10001 复判: 无 busyHint → 保持 429', () => {
   assert.strictEqual(m.http, 429);
 });
 
-test('映射: 有 detail 无结构化状态 → 502 上游拒绝请求', () => {
+test('映射: HTTP 400 保留参数错误，不转成可重试的 502', () => {
   const m = translateUpstreamError({ message: '某错误' }, '', 400);
-  assert.strictEqual(m.http, 502);
+  assert.strictEqual(m.http, 400);
+  assert.strictEqual(m.type, 'invalid_request_error');
   assert.ok(m.message.includes('某错误'));
+});
+
+test('映射: HTTP 400 或 HTTP 200 内嵌 code 400 明确上下文超限，保留原文与标准 code', () => {
+  const messages = [
+    "This model's maximum context length is 1048576 tokens. However, you requested 1048576 output tokens and your prompt contains 89 characters (more than 0 characters, which is the upper bound for 0 input tokens). Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_text, value=89)",
+    "This model's maximum context length is 1048576 tokens. However, you requested 1047552 output tokens and your prompt contains at least 1025 input tokens, for a total of at least 1048577 tokens. Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_tokens, value=1025)",
+    "Requested token count exceeds the model's maximum context length of 163840 tokens. You requested a total of 163849 tokens: 9 tokens from the input messages and 163840 tokens for the completion. Please reduce the number of tokens in the input messages or the completion to fit within the limit.",
+  ];
+  for (const status of [200, 400]) {
+    for (const message of messages) {
+      const m = translateUpstreamError({ error: { message, type: 'BadRequestError', code: 400 } }, '', status);
+      assert.strictEqual(m.http, 400);
+      assert.strictEqual(m.type, 'invalid_request_error');
+      assert.strictEqual(m.code, 'context_length_exceeded');
+      assert.ok(m.message.includes(message));
+    }
+  }
+});
+
+test('映射: 标准 context_length_exceeded code 也支持 HTTP 200 内嵌错误', () => {
+  for (const status of [200, 400]) {
+    for (const body of [
+      { error: { message: 'context overflow', code: 'context_length_exceeded' } },
+      { message: 'context overflow', code: 'context_length_exceeded' },
+    ]) {
+      const m = translateUpstreamError(body, '', status);
+      assert.strictEqual(m.http, 400);
+      assert.strictEqual(m.type, 'invalid_request_error');
+      assert.strictEqual(m.code, 'context_length_exceeded');
+      assert.ok(m.message.includes('context overflow'));
+    }
+  }
+});
+
+test('映射: 无效 max_tokens 不误报为上下文超限', () => {
+  for (const status of [200, 400]) {
+    for (const message of ['max_tokens must be greater than 0', 'Range of max_tokens should be [1, 131072]']) {
+      for (const code of [400, '400']) {
+        for (const body of [{ error: { message, type: 'BadRequestError', code } }, { message, code }]) {
+          const m = translateUpstreamError(body, '', status, hintOver);
+          assert.strictEqual(m.http, 400);
+          assert.strictEqual(m.type, 'invalid_request_error');
+          assert.strictEqual(m.code, undefined);
+          assert.ok(m.message.includes(message));
+          assert.doesNotMatch(m.message, /上下文超限|稍后重试/);
+        }
+      }
+    }
+  }
+});
+
+test('映射: 上下文文案需要明确 400，不覆盖上游故障', () => {
+  for (const message of [
+    "This model's maximum context length is 1048576 tokens. Internal failure.",
+    "Requested token count exceeds the model's maximum context length of 163840 tokens. Internal failure.",
+  ]) {
+    for (const [status, code] of [[200, undefined], [200, 500], [500, undefined], [500, 400]]) {
+      const m = translateUpstreamError({ error: { message, code } }, '', status);
+      assert.strictEqual(m.http, 502);
+      assert.strictEqual(m.code, undefined);
+    }
+  }
+});
+
+test('映射: 明确 HTTP 认证、端点、体积和限流状态仍优先', () => {
+  for (const code of ['context_length_exceeded', 400, '400']) {
+    const body = { error: { message: "Requested token count exceeds the model's maximum context length of 163840 tokens.", code } };
+    for (const [status, expected] of [[302, 502], [401, 401], [403, 401], [404, 502], [413, 413], [429, 429]]) {
+      const m = translateUpstreamError(body, '', status, hintOver);
+      assert.strictEqual(m.http, expected);
+      assert.strictEqual(m.code, undefined);
+    }
+  }
+});
+
+test('映射: 无结构化详情的 HTTP 400 保留状态，避免返回 HTML 页面', () => {
+  const plain = translateUpstreamError(null, 'invalid parameter', 400);
+  assert.strictEqual(plain.http, 400);
+  assert.ok(plain.message.includes('invalid parameter'));
+  for (const raw of ['', '<html>Bad Request</html>']) {
+    const m = translateUpstreamError(null, raw, 400);
+    assert.strictEqual(m.http, 400);
+    assert.strictEqual(m.type, 'invalid_request_error');
+    assert.match(m.message, /HTTP 400/);
+    assert.doesNotMatch(m.message, /<html>/);
+  }
 });
 
 test('映射: HTML 错误页(TsinghuaLB 形态)', () => {
@@ -159,16 +248,16 @@ test('failed-stream: 截断(truncated)形态', () => {
   assert.ok(d.message.includes('[DONE]'));
 });
 
-// ---- 截断两形态(1.9.2,R2):零字节(首帧都没等到)与中途截断的处置不同,
-// 共用 GATEWAY_IDLE_MS(学校网关读空闲超时实测 60.0~60.1s)作分界 ----
-test('截断两形态: 零字节且等待达网关墙 → 首字节文案(维护者定稿:只说事实与处置)', () => {
+// 零字节与中途截断分别提示，只描述观测到的等待与断流。
+test('截断两形态: 零字节且长时间等待 → 首字节文案', () => {
   const d = describeFailedStream(
     { type: 'protocol-error', reason: 'truncated', idleMs: 61_400, sawBytes: false }, 'stream', CFG);
   assert.strictEqual(d.note, 'stream-truncated');
   assert.ok(d.message.includes('未产出首字节'), d.message);
-  assert.ok(d.message.includes('等待后重试'), d.message);
+  assert.ok(d.message.includes('已等待 61s'), d.message);
+  assert.ok(d.message.includes('重试'), d.message);
   assert.ok(d.message.includes('缩短对话'), d.message);
-  // 定稿文案不再带秒数/网关归因/直连建议——排障信息由日志的 idle=Ns 承载
+  assert.ok(!d.message.includes('网关'), d.message);
   assert.ok(!d.message.includes('PROXY_UPSTREAM'), d.message);
 });
 
@@ -179,7 +268,7 @@ test('截断两形态: 中途截断 → 距上一帧时长 + 已交付 KB + 可�
   assert.strictEqual(d.note, 'stream-truncated');
   assert.ok(d.message.includes('截断'), d.message);          // README FAQ 按"截断"检索
   assert.ok(d.message.includes('距上一帧 60s'), d.message);
-  assert.ok(d.message.includes('疑似学校网关 60 秒超时'), d.message);
+  assert.ok(!d.message.includes('网关'), d.message);
   assert.ok(d.message.includes('已发送 12.1 KB'), d.message);
   assert.ok(d.message.includes('重试'), d.message);
 });
@@ -193,18 +282,18 @@ test('截断两形态: 中途截断但无交付字节(聚合路径)不含 KB 句
   assert.ok(d.message.includes('重试'), d.message);
 });
 
-test('截断两形态: 中途截断但静默未达网关墙 → 连接中断,不带网关归因', () => {
+test('截断两形态: 中途截断且静默较短 → 连接中断', () => {
   const d = describeFailedStream(
     { type: 'protocol-error', reason: 'truncated', idleMs: 5_000, sawBytes: true }, 'stream', CFG, 4_096);
   assert.ok(d.message.includes('距上一帧 5s 后连接中断'), d.message);
   assert.ok(d.message.includes('重试'), d.message);
-  assert.ok(!d.message.includes('网关'), '短静默的中途截断不是网关读空闲墙,不得归因网关');
+  assert.ok(!d.message.includes('网关'), d.message);
 });
 
-test('截断两形态: 零字节但未达网关墙(连接层早夭)不带网关归因', () => {
+test('截断两形态: 等待首字节时较早断开', () => {
   const d = describeFailedStream(
     { type: 'protocol-error', reason: 'truncated', idleMs: 1_200, sawBytes: false }, 'agg', CFG);
-  assert.ok(d.message.includes('等待首字节 1s'), d.message);
+  assert.ok(d.message.includes('未产出首字节（已等待 1s）'), d.message);
   assert.ok(!d.message.includes('网关'), d.message);
 });
 

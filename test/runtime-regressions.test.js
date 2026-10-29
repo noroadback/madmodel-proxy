@@ -16,12 +16,15 @@ const config = require('../config');
 
 const auth = { ok: true, token: 'synthetic-token', msLeft: 3600000 };
 const tools = ['Read', 'Write'].map(name => ({ type: 'function', function: { name, parameters: { type: 'object' } } }));
-const markup = name => `<｜DSML｜tool_use><｜DSML｜tool call="${name}"></｜DSML｜invoke></｜DSML｜tool_use>`;
 const native = name => ({ id: 'call-native', type: 'function', function: { name, arguments: '{}' } });
 const completion = (content, calls) => ({ choices: [{ index: 0, message: {
   role: 'assistant', content, ...(calls ? { tool_calls: calls } : {}),
 }, finish_reason: calls ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 2, completion_tokens: 3 } });
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
+const tinyImage = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jrWQAAAAASUVORK5CYII=';
+const imageMessages = count => [{ role: 'user', content: [{ type: 'text', text: 'hi' },
+  ...Array.from({ length: count }, () => ({ type: 'image_url', image_url: { url: tinyImage } })),
+] }];
 
 function context(body) {
   const out = { chunks: [], lines: [] };
@@ -37,7 +40,7 @@ function context(body) {
     async writeSseLine(line) { headers = true; out.lines.push(line); },
     endResponse() { out.ended = true; },
     sendJson(status, body, extra) { headers = true; Object.assign(out, { status, body, extra }); },
-    sendError(status, message, type, extra) { headers = true; Object.assign(out, { status, message, type, extra }); },
+    sendError(status, message, type, extra, code) { headers = true; Object.assign(out, { status, message, type, extra, code }); },
   };
 }
 function delivered(ctx) {
@@ -56,7 +59,11 @@ async function run(body, responses, overrides = {}) {
       assert.ok(next, '不得发生未预期的重试');
       if (next.type === 'stream') {
         const ch = next.body.choices[0];
-        await args.onChunk({ choices: [{ index: 0, delta: ch.message, finish_reason: ch.finish_reason }] });
+        const delta = { ...ch.message, ...(ch.message.tool_calls ? {
+          tool_calls: ch.message.tool_calls.map((call, index) => ({ ...call, index })),
+        } : {}) };
+        await args.onChunk({ choices: [{ index: 0, delta, finish_reason: ch.finish_reason }] });
+        if (next.body.usage) await args.onChunk({ choices: [], usage: next.body.usage });
         return { type: 'stream', usage: next.body.usage };
       }
       return next;
@@ -67,49 +74,215 @@ async function run(body, responses, overrides = {}) {
   return { ctx, seen };
 }
 
-for (const stream of [false, true]) {
-  for (const transport of ['stream', 'completion']) {
-    test(`完整变体标记直接恢复，客户端流式=${stream}，上游=${transport}`, async () => {
-      const { ctx, seen } = await run({ stream, tools }, [{ type: transport, body: completion(markup('Write')) }]);
-      const body = delivered(ctx);
-      assert.equal(body.choices[0].message.tool_calls[0].function.name, 'Write');
-      assert.equal(body.choices[0].message.content, null);
-      assert.equal(seen.length, 1);
-    });
-    test(`指定工具名不会恢复其他工具，客户端流式=${stream}，上游=${transport}`, async () => {
-      const { ctx, seen } = await run({ stream, tools, tool_choice: { type: 'function', function: { name: 'Write' } } },
-        [{ type: transport, body: completion(markup('Read')) }]);
-      assert.equal(delivered(ctx).choices[0].message.tool_calls, undefined);
-      assert.equal(seen[0].tool_choice, 'none', 'Qwen 上游兼容降级仍生效');
-    });
-    for (const mode of ['none', 'disabled']) {
-      test(`工具恢复关闭不解析也不重试，${mode}，客户端=${stream}，上游=${transport}`, async () => {
-        const { ctx, seen } = await run({ stream, tools, tool_choice: mode === 'none' ? 'none' : 'auto' },
-          [{ type: transport, body: completion(markup('Write')) }], { toolCallFix: mode !== 'disabled' });
-        assert.equal(delivered(ctx).choices[0].message.content, markup('Write'));
-        assert.equal(delivered(ctx).choices[0].message.tool_calls, undefined);
-        assert.equal(seen.length, 1);
-      });
+test('含图请求成功或失败时默认隐藏预算，调试模式保留分项', async t => {
+  const lines = [];
+  t.mock.method(console, 'log', (...args) => lines.push(args.join(' ')));
+  const cases = [
+    { status: 200, response: { type: 'stream', body: completion('ok') } },
+    { status: 429, response: { type: 'upstream-error', status: 429, body: {}, raw: '' } },
+    { status: 413, response: { type: 'upstream-error', status: 413, body: {}, raw: '' } },
+    { status: 502, response: { type: 'network-error', cause: 'synthetic connection failure' } },
+  ];
+  for (const { stream, debugBudget } of [
+    { stream: false, debugBudget: false }, { stream: true, debugBudget: false },
+    { stream: false, debugBudget: true }, { stream: true, debugBudget: true },
+  ]) {
+    for (const { status, response } of cases) {
+      lines.length = 0;
+      const { ctx, seen } = await run({ model: 'DeepSeek-V4.1-Flash', stream,
+        max_tokens: 1048576, messages: imageMessages(64) }, [response], { debugBudget });
+      assert.strictEqual(seen.length, 1);
+      assert.ok(seen[0].max_tokens < 1048576, '日志开关不影响输出收缩');
+      const summaries = lines.filter(line => line.includes('预算['));
+      assert.strictEqual(summaries.length, debugBudget ? 1 : 0, `stream=${stream}, status=${status}, debug=${debugBudget}`);
+      if (debugBudget) {
+        for (const part of [/文本=\d+/, /模板=1024/, /工具=0/, /文本误差=0/, /窗口=1048576/]) {
+          assert.match(summaries[0], part);
+        }
+        assert.ok(summaries[0].includes(`输出=${seen[0].max_tokens}`));
+      } else {
+        assert.doesNotMatch(lines.join('\n'), /预算|图像实测|估值差|图像策略/);
+      }
+      if (status === 200) {
+        assert.strictEqual(delivered(ctx).choices[0].message.content, 'ok');
+        assert.match(lines.join('\n'), / 200 \d+\.\d+s .*token 2\/3 累计 2\/3/);
+        if (debugBudget) assert.match(lines.join('\n'), /输出预算 \d+/);
+      } else {
+        assert.strictEqual(ctx.out.status, status, '日志阶段标记不得成为客户端状态码');
+      }
     }
   }
-  for (const name of ['Write', 'Read']) {
-    test(`重试保留合法原生调用并约束名称 ${name}，流式=${stream}`, async () => {
-      const { ctx, seen } = await run({ stream, tools, tool_choice: { type: 'function', function: { name: 'Write' } } }, [
-        { type: 'completion', body: completion('') },
-        { type: 'completion', body: completion('已准备', [native(name)]) },
-      ]);
-      const msg = delivered(ctx).choices[0].message;
-      assert.equal(msg.tool_calls?.[0]?.function.name, name === 'Write' ? 'Write' : undefined);
-      assert.equal(seen.length, 2);
-    });
+});
+
+test('新用量明细跨流式、聚合和工具路径完整保留，缺失用量不补零', async t => {
+  t.mock.method(console, 'log', () => {});
+  const measured = { prompt_tokens: 200, completion_tokens: 3, total_tokens: 203,
+    prompt_tokens_details: { image_tokens: 184, cached_tokens: 0, future_field: { value: 42 } } };
+  const cases = [measured, { ...measured, prompt_tokens_details: null },
+    { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }, null, undefined];
+  for (const stream of [false, true]) for (const type of ['stream', 'completion']) {
+    for (const calls of [undefined, [native('Read')]]) for (const usage of cases) {
+      const body = completion('ok', calls);
+      if (usage === undefined) delete body.usage;
+      else body.usage = usage;
+      const { ctx, seen } = await run({ stream, tools, stream_options: { include_usage: false } }, [{ type, body }]);
+      assert.equal(seen.length, 1);
+      assert.equal(seen[0].stream_options.include_usage, false);
+      if (!stream) {
+        assert.deepEqual(ctx.out.body.usage, type === 'stream' ? usage ?? null : usage);
+      } else {
+        const all = [...ctx.out.chunks, ...ctx.out.lines.filter(l => l.startsWith('data: {'))
+          .map(l => JSON.parse(l.slice(6)))];
+        assert.deepEqual(all.find(c => c.usage)?.usage, usage || undefined);
+      }
+    }
   }
-  test(`重试的截断调用不得执行，流式=${stream}`, async () => {
-    const retryBody = completion('', [native('Write')]);
-    retryBody.choices[0].finish_reason = 'length';
-    const { ctx } = await run({ stream, tools }, [
-      { type: 'completion', body: completion('') }, { type: 'completion', body: retryBody },
-    ]);
-    assert.equal(delivered(ctx).choices[0].message.tool_calls, undefined);
+});
+
+test('图像用量原样返回，相同请求的输出预算不受历史 usage 影响', async t => {
+  const logs = [];
+  t.mock.method(console, 'log', (...args) => logs.push(args.join(' ')));
+  for (const { stream, debugBudget } of [
+    { stream: false, debugBudget: false }, { stream: true, debugBudget: false },
+    { stream: false, debugBudget: true }, { stream: true, debugBudget: true },
+  ]) {
+    logs.length = 0;
+    const sent = [];
+    const service = createProxyService({ config: { ...config, debugBudget }, tokenState: () => auth,
+      upstreamClient: { request: async args => {
+        sent.push(args.payload.max_tokens);
+        const body = completion('ok');
+        body.usage = { prompt_tokens: 13000, completion_tokens: 3,
+          prompt_tokens_details: { multimodal_tokens: { image: 11840 } } };
+        if (stream) {
+          await args.onChunk({ choices: [{ index: 0, delta: body.choices[0].message, finish_reason: 'stop' }] });
+          await args.onChunk({ choices: [], usage: body.usage });
+          return { type: 'stream', usage: body.usage };
+        }
+        return { type: 'completion', body };
+      } },
+    });
+    for (let i = 0; i < 2; i++) {
+      const messages = imageMessages(64);
+      const ctx = context({ model: 'DeepSeek-V4.1-Flash', stream, max_tokens: 1048576, messages });
+      await service.handleRequest(ctx);
+      const result = delivered(ctx);
+      assert.equal(result.choices[0].message.content, 'ok');
+      assert.equal(result.usage.prompt_tokens_details.multimodal_tokens.image, 11840);
+    }
+    assert.equal(sent.length, 2, '两次用户请求只发两次上游，不另做计数探测');
+    assert.equal(sent[1], sent[0], '预算不依赖前一请求的图片用量');
+    const summaries = logs.filter(line => line.includes('预算['));
+    assert.equal(summaries.length, debugBudget ? 2 : 0);
+    assert.doesNotMatch(logs.join('\n'), /图像实测|估值差|图像策略/);
+    if (debugBudget) {
+      assert.match(summaries[0], /图像估值=11776 图像余量=512 来源=dimensions/);
+    }
+    if (!debugBudget) assert.doesNotMatch(logs.join('\n'), /预算/);
+    assert.match(logs.join('\n'), /token 13000\/3 累计 26\.0K\/6/);
+  }
+});
+
+test('含图请求的无效输出参数不会导致日志抛错或泄漏参数内容', async t => {
+  const logs = [];
+  t.mock.method(console, 'log', (...args) => logs.push(args.join(' ')));
+  for (const max_tokens of [{ toString: null }, 'PRIVATE_PARAMETER'.repeat(1000), null]) {
+    logs.length = 0;
+    const { ctx, seen } = await run({ model: 'DeepSeek-V4.1-Flash', max_tokens,
+      messages: imageMessages(1) }, [{ type: 'upstream-error', status: 400,
+      body: { message: 'invalid max_tokens' }, raw: '' }], { debugBudget: true });
+    assert.equal(seen.length, 1, '参数交给已有上游校验路径，日志本身不能中断请求');
+    assert.equal(ctx.out.status, 400);
+    const summary = logs.find(line => line.includes('预算['));
+    assert.match(summary, /输出=无效/);
+    assert.doesNotMatch(summary, /PRIVATE_PARAMETER|toString/);
+    assert.ok(summary.length < 500);
+  }
+});
+
+test('纯文本预算收缩和本地超限默认静默，调试明细不进入客户端响应', async t => {
+  const logs = [];
+  t.mock.method(console, 'log', (...args) => logs.push(args.join(' ')));
+  for (const debugBudget of [false, true]) {
+    for (const stream of [false, true]) {
+      logs.length = 0;
+      const body = { model: 'DeepSeek-V4.1-Flash', stream, max_tokens: 1048576 };
+      const { ctx, seen } = await run(body, [{ type: 'completion', body: completion('ok') }], { debugBudget });
+      assert.equal(seen.length, 1);
+      assert.ok(seen[0].max_tokens < body.max_tokens);
+      assert.equal(delivered(ctx).choices[0].message.content, 'ok');
+      assert.match(logs.join('\n'), / 200 \d+\.\d+s .*token 2\/3 累计 2\/3/);
+      if (debugBudget) {
+        assert.match(logs.join('\n'), /预算\[文本=\d+.*窗口=1048576/);
+        assert.match(logs.join('\n'), /输出预算 \d+/);
+      } else {
+        assert.doesNotMatch(logs.join('\n'), /预算|估值|余量|图像策略/);
+      }
+
+      logs.length = 0;
+      const rejected = await run(body, [], { debugBudget,
+        limitsFor: () => ({ contextWindow: 1024, maxOutputTokens: 1048576 }),
+      });
+      assert.equal(rejected.seen.length, 0, '真实文本超限仍由本地拒绝');
+      assert.equal(rejected.ctx.out.status, 413);
+      assert.equal(rejected.ctx.out.message, '对话内容过长，请缩短对话或新建会话后重试。');
+      if (debugBudget) {
+        assert.match(logs.join('\n'), /预算\[.*窗口=1024/);
+      } else {
+        assert.doesNotMatch(logs.join('\n'), /预算|估值|余量|1024|1048576/);
+      }
+    }
+  }
+});
+
+for (const stream of [false, true]) {
+  test(`Qwen 未知图片采用软预算，不把繁忙误报成超限，流式=${stream}`, async () => {
+    const { ctx, seen } = await run({ stream, max_tokens: 262144, messages: [
+      { role: 'user', content: [{ type: 'text', text: 'hi' },
+        { type: 'image_url', image_url: { url: 'https://example.invalid/review.png' } }] },
+    ] }, [{ type: 'upstream-error', status: 200, body: { errorMessage: '服务器繁忙' }, raw: '' }]);
+    assert.strictEqual(seen.length, 1);
+    assert.ok(seen[0].max_tokens > 243000 && seen[0].max_tokens < 246000,
+      '无法读取远程图片尺寸时扣除软估值，仍应发送上游');
+    assert.strictEqual(ctx.out.status, 429);
+    assert.match(ctx.out.message, /服务器繁忙/);
+    assert.doesNotMatch(ctx.out.message, /预算|估值|校准|接近上下文上限|疑似上下文超限/);
+  });
+
+  test(`64 张小图只请求上游一次，保留图片与客户端输出预算，流式=${stream}`, async () => {
+    for (const extra of [{}, { max_tokens: 4096 }, { reasoning_effort: 'none', max_tokens: 16 }]) {
+      const messages = imageMessages(64);
+      const { ctx, seen } = await run({ model: 'DeepSeek-V4.1-Flash', stream, messages, ...extra },
+        [{ type: 'stream', body: completion('ok') }]);
+      assert.strictEqual(seen.length, 1);
+      assert.deepEqual(seen[0].messages, messages, '图片不得丢失或被替换');
+      assert.strictEqual(seen[0].max_tokens, extra.max_tokens);
+      assert.strictEqual(Object.hasOwn(seen[0], 'max_tokens'), Object.hasOwn(extra, 'max_tokens'));
+      assert.strictEqual(delivered(ctx).choices[0].message.content, 'ok');
+    }
+  });
+
+  test(`远程图片透传上游，并保留上游真实拒绝，流式=${stream}`, async () => {
+    const unknownImages = [{ role: 'user', content: Array.from({ length: 64 }, () => ({
+      type: 'image_url', image_url: { url: 'https://example.invalid/unmeasured.png' },
+    })) }];
+    for (const status of [200, 413, 429]) {
+      const { ctx, seen } = await run({ model: 'DeepSeek-V4.1-Flash', stream, max_tokens: 4096,
+        messages: unknownImages }, [{ type: 'upstream-error', status,
+        body: { errorMessage: '服务器繁忙' }, raw: '' }]);
+      assert.strictEqual(seen.length, 1, '图片不得触发本地拒绝或额外重试');
+      assert.strictEqual(ctx.out.status, status === 200 ? 429 : status);
+      if (status === 200) assert.match(ctx.out.message, /服务器繁忙/);
+    }
+  });
+
+  test(`文字和工具已超过窗口仍在本地拒绝，流式=${stream}`, async () => {
+    for (const messages of [[{ role: 'user', content: 'hi' }], imageMessages(64)]) {
+      const { ctx, seen } = await run({ model: 'DeepSeek-V4.1-Flash', stream, max_tokens: 4096, tools, messages }, [],
+        { limitsFor: () => ({ contextWindow: 1200, maxOutputTokens: 4096, promptTokenMarginRatio: 0 }) });
+      assert.strictEqual(ctx.out.status, 413);
+      assert.strictEqual(seen.length, 0, '文字和工具本身超限时不发起上游调用');
+    }
   });
 }
 
@@ -210,6 +383,28 @@ test('凭据等待释放槽位，恢复时仍遵守本地并发上限', async ()
 });
 
 for (const stream of [true, false]) {
+  test(`HTTP 200 JSON 内嵌 R1 上下文错误交付 400 与标准 code，流式=${stream}`, async t => {
+    // 2026-10-17 R1 边界探测的响应；本地预算已调整时，上游仍可能按实际输入拒绝。
+    const message = "Requested token count exceeds the model's maximum context length of 163840 tokens. You requested a total of 163849 tokens: 9 tokens from the input messages and 163840 tokens for the completion. Please reduce the number of tokens in the input messages or the completion to fit within the limit.";
+    const body = { error: { object: 'error', message, type: 'BadRequestError', param: null, code: 400 } };
+    let requests = 0;
+    t.mock.method(globalThis, 'fetch', async (_url, options) => {
+      requests++;
+      assert.equal(JSON.parse(options.body).stream, true);
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    const service = createProxyService({ config, tokenState: () => auth,
+      upstreamClient: createUpstreamClient(config) });
+    const ctx = context({ model: 'DeepSeek-R1-W8A8', stream, max_tokens: 163840 });
+    await service.handleRequest(ctx);
+    assert.equal(requests, 1, '明确参数错误不应重试');
+    assert.equal(ctx.out.status, 400);
+    assert.equal(ctx.out.type, 'invalid_request_error');
+    assert.equal(ctx.out.code, 'context_length_exceeded');
+    assert.ok(ctx.out.message.includes(message));
+    assert.deepEqual(ctx.out.chunks, []);
+    assert.deepEqual(ctx.out.lines, [], '不得伪装成成功 SSE 或发送 DONE');
+  });
   test(`上游并发错误映射 429 且保留 Retry-After，流式=${stream}`, async () => {
     const { ctx } = await run({ stream }, [{ type: 'upstream-error', status: 200,
       body: { errorMessage: '您的同时进行中的请求过多，请等待已有请求完成后再试' }, retryAfter: '7' }]);
@@ -224,7 +419,7 @@ test('运行状态核验代理标识，不把其他 OpenAI 服务当成本代理
     [200, { proxy: 'madmodel' }, true], [500, { proxy: 'madmodel' }, false],
   ]) {
     assert.equal(await isProxyRunning(12345, async url => {
-      assert.equal(url, 'http://127.0.0.1:12345/');
+      assert.equal(url, 'http://127.0.0.1:12345/healthz');
       return { status, json: async () => body };
     }), expected);
   }

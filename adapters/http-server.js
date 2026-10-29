@@ -3,7 +3,7 @@
 // (Content-Length 预检/限额/超时)、响应写出(JSON/SSE/错误)、token 文件的
 // mtime 热加载缓存。业务判定在 core/proxy-service.js。
 // 本模块是 core 与 platform 之间的装配点:core 不接触 req/res/fs。
-// 本地无鉴权:只监听 127.0.0.1 + Host 白名单即为本机边界(边界说明见 SECURITY.md)。
+// 默认回环监听；可配置 API Key 和局域网访问，边界说明见 SECURITY.md。
 
 'use strict';
 
@@ -11,6 +11,8 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { performance } = require('node:perf_hooks');
+const { validateListenConfig } = require('../core/listen-config');
 const { jwtExpiresAt } = require('../madmodel-auth');
 const credentials = require('../platform/credentials');
 const { atomicWrite } = require('../platform/file-store');
@@ -27,33 +29,36 @@ function sendJson(res, status, value, extraHeaders) {
   res.end(body);
 }
 
-function openAiError(res, status, message, type, extraHeaders) {
+function openAiError(res, status, message, type, extraHeaders, code) {
   sendJson(res, status, {
-    error: { message, type: type || 'proxy_error', code: status },
+    error: { message, type: type || 'proxy_error', code: code ?? status },
   }, extraHeaders);
 }
 
-// ===== API Key 鉴权(可选) =====
-// 从请求提取 key:优先 Authorization: Bearer <key>,回退 x-api-key。
-function extractApiKey(req) {
-  const auth = req.headers['authorization'] || '';
-  const m = /^Bearer\s+(.+)$/i.exec(auth);
-  if (m) return m[1].trim();
-  const x = req.headers['x-api-key'];
-  return x ? String(x).trim() : '';
+function endSseError(res, message, type = 'proxy_error', code = 502) {
+  if (res.destroyed || res.writableEnded) return;
+  // 错误是终态，不等待 drain，避免慢读客户端令失败请求一直占用槽位。
+  // OpenAI SDK 同时识别 event:error 和 data.error；绝不能随后补发 [DONE]。
+  res.end(`event: error\ndata: ${JSON.stringify({ error: { message, type, code } })}\n\n`);
 }
 
-// 时间恒定比较,防计时侧信道泄露 key 长度/前缀。任一 key 命中即通过。
-function apiKeyAccepted(presented, keys) {
-  if (!presented) return false;
-  const a = Buffer.from(presented);
-  let ok = false;
-  for (const k of keys) {
-    const b = Buffer.from(k);
-    // 长度不等时 timingSafeEqual 会抛;先判等长再比,避免异常与长度旁路
-    if (a.length === b.length && crypto.timingSafeEqual(a, b)) ok = true;
+// Authorization 存在时不回退，避免两个头的含义冲突。
+function extractApiKey(req) {
+  if (req.headers.authorization !== undefined) {
+    return /^Bearer\s+(\S+)\s*$/i.exec(req.headers.authorization)?.[1] || '';
   }
-  return ok;
+  return typeof req.headers['x-api-key'] === 'string' ? req.headers['x-api-key'].trim() : '';
+}
+
+const keyDigest = key => crypto.createHash('sha256').update(key).digest();
+
+// 比较固定长度摘要，并检查所有配置密钥，不按匹配位置提前返回。
+function apiKeyAccepted(presented, digests) {
+  if (!presented) return false;
+  const digest = keyDigest(presented);
+  let accepted = 0;
+  for (const expected of digests) accepted |= Number(crypto.timingSafeEqual(digest, expected));
+  return accepted !== 0;
 }
 
 // ===== token 热加载缓存 =====
@@ -99,11 +104,11 @@ function createTokenCache(config, { now = Date.now, readToken = credentials.read
 // ===== 请求体读取 =====
 // Content-Length 预检 + chunked 读取 + 大小限制 + 完成时限。错误带 code/note,
 // 由本层直接映射为 HTTP 响应(读取失败时业务层尚未介入)。
-function bodyLimitMessage(size, limit) {
-  return `请求体 ${(size / 1024).toFixed(0)} KB 超过本地上限 ${(limit / 1024).toFixed(0)} KB，请缩小图片或缩短对话。`;
+function bodyLimitMessage(limit) {
+  return `请求体超过本地 ${limit / 1048576} MiB 上限，请缩小图片或缩短对话。`;
 }
 
-function readBody(req, limit, timeout) {
+function readBody(req, limit, timeout, reserve) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
@@ -125,10 +130,18 @@ function readBody(req, limit, timeout) {
       if (size > limit) {
         aborted = true;
         cleanup();
-        const e = new Error(bodyLimitMessage(size, limit));
+        const e = new Error(bodyLimitMessage(limit));
         e.code = 'BODY_TOO_LARGE';
         e.size = size;
         e.note = 'body-overflow';
+        reject(e);
+        return;
+      }
+      try { reserve(size); }
+      catch (e) {
+        aborted = true;
+        cleanup();
+        e.size = size;
         reject(e);
         return;
       }
@@ -136,8 +149,10 @@ function readBody(req, limit, timeout) {
     };
     const onEnd = () => {
       if (aborted) return;
+      aborted = true;
+      const rawBody = Buffer.concat(chunks);
       cleanup();
-      resolve({ rawBody: Buffer.concat(chunks), size });
+      resolve({ rawBody, size });
     };
     const onError = () => {
       // 客户端断开:无响应可写,静默放弃
@@ -154,24 +169,29 @@ function readBody(req, limit, timeout) {
       req.removeListener('data', onData);
       req.removeListener('end', onEnd);
       req.removeListener('error', onError);
+      req.removeListener('aborted', onError);
+      chunks.length = 0;
     }
     req.on('data', onData);
     req.on('end', onEnd);
     req.on('error', onError);
+    req.on('aborted', onError);
   });
 }
 
-async function readChatBody(req, config) {
+async function readChatBody(req, config, reserve) {
   // Content-Length 预检:超限在收任何 body 字节前就拒绝,不陪慢速攻击者耗资源
   const declaredLen = Number(req.headers['content-length']);
   if (Number.isFinite(declaredLen) && declaredLen > config.bodyLimit) {
-    const e = new Error(bodyLimitMessage(declaredLen, config.bodyLimit));
+    const e = new Error(bodyLimitMessage(config.bodyLimit));
     e.code = 'BODY_TOO_LARGE';
     e.size = declaredLen;
     e.note = 'cl-precheck';
     throw e;
   }
-  const { rawBody, size } = await readBody(req, config.bodyLimit, config.bodyTimeout);
+  // 已知长度先预留，chunked 按实际接收量递增；读取完成后仍保留到业务结束。
+  if (Number.isFinite(declaredLen) && declaredLen > 0) reserve(declaredLen);
+  const { rawBody, size } = await readBody(req, config.bodyLimit, config.bodyTimeout, reserve);
   if (!size) {
     const e = new Error('请求体为空');
     e.code = 'EMPTY_BODY';
@@ -220,65 +240,54 @@ function createCredentialWaiter(getToken) {
 }
 
 function createHttpServer({ config, service, getToken, modelRegistry }) {
+  const { host: bindHost, apiKeys, loopbackOnly } = validateListenConfig(config);
+  const keyDigests = apiKeys.map(keyDigest);
+  const bindAuthority = bindHost.includes(':') ? `[${bindHost}]` : bindHost;
   const allowedHosts = new Set([
     `127.0.0.1:${config.port}`, `localhost:${config.port}`, `[::1]:${config.port}`,
     '127.0.0.1', 'localhost', '[::1]',
+    bindAuthority, `${bindAuthority}:${config.port}`,
   ]);
   const tokenState = createTokenState(getToken);
-  // 鉴权与监听形态:配了 apiKeys 即开启 Bearer 校验;非回环监听
-  // (PROXY_BIND_HOST=0.0.0.0 等)时 Host 白名单不再是边界(外部 IP 的 Host
-  // 头本就不在白名单),由 API Key 接管。两者独立:回环+key(本机多用户隔离)
-  // 与 对外+key(局域网鉴权)都成立。
-  const apiKeys = config.apiKeys || [];
-  const requireAuth = apiKeys.length > 0;
-  const loopbackOnly = ['127.0.0.1', 'localhost', '::1'].includes(config.host);
+  const bodyBudget = config.bodyBudget ?? Math.max(256 * 1048576, config.bodyLimit);
+  let pendingBodyBytes = 0;
 
   const server = http.createServer((req, res) => {
     const started = Date.now();
+    const startedMonotonic = performance.now();
     const url = (req.url || '').split('?')[0];
 
     // socket 层错误兜底:单条连接的故障不应击穿整个进程
     req.on('error', () => {});
     res.on('error', () => {});
 
-    // 健康探测:免鉴权、免白名单(仅回 ok,不碰上游),供 Makefile/脚本探活
-    if (req.method === 'GET' && url === '/healthz') {
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      return res.end('ok');
-    }
-
-    // API Key 鉴权(配了才校验)。放在最前:未授权请求不该看到白名单/端点细节。
-    if (requireAuth && !apiKeyAccepted(extractApiKey(req), apiKeys)) {
-      service.logReq(req, 401, started, 0, 'auth-rejected');
-      return openAiError(res, 401, 'API Key 无效或缺失(Authorization: Bearer <key> 或 x-api-key)', 'auth_error');
-    }
-
-    // Host 白名单:防 DNS rebinding(外部域名解析到 127.0.0.1 后,浏览器借合法
-    // Origin 跨域读本代理响应)。只认本机地址。早退路径同样记日志:这些是防御
-    // 被触发的信号,不留痕则威胁模型永远无法验证。
-    // 仅回环监听时启用——对外监听(0.0.0.0)时外部 IP 的 Host 头合法却不在
-    // 白名单,此时边界由上面的 API Key 鉴权承担(requireAuth 已在启动时强制)。
+    // 回环监听保留 Host 白名单；局域网请求由下面的密钥检查授权。
     const host = String(req.headers.host || '').toLowerCase();
     if (loopbackOnly && !allowedHosts.has(host)) {
       service.logReq(req, 403, started, 0, 'host-rejected');
       return openAiError(res, 403, 'Host 未获允许，请使用本机地址访问。');
     }
-    // 浏览器 CSRF 缓解:恶意网页可用 no-cors POST 向本机端口盲发请求(Host
-    // 是浏览器正确设置的,白名单防不住写入通道;浏览器对跨源 POST 必带
-    // Origin)。非本机来源拒绝;非浏览器客户端(SDK/智能体)不发 Origin,
-    // 自然豁免;localhost 系页面(本地 Web UI)放行。
-    // 对外监听+已鉴权时跳过:合法的远程 SDK 客户端不发 Origin,而带 key 的
-    // 请求已通过鉴权,CSRF(依赖浏览器自动带凭据)在 key 模型下不适用。
+    // 回环模式拒绝外部网页；局域网模式仍需显式提交密钥，不开放 CORS。
     if (loopbackOnly && req.headers.origin !== undefined) {
       let localOrigin = false;
       try {
         const h = new URL(req.headers.origin).hostname;
-        localOrigin = h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || h === '::1';
+        localOrigin = h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || h === bindAuthority;
       } catch (e) { /* 非法 Origin(含 null)按非本机拒绝 */ }
       if (!localOrigin) {
         service.logReq(req, 403, started, 0, 'origin-rejected');
         return openAiError(res, 403, '已拒绝外部网页请求，仅支持本地页面。');
       }
+    }
+
+    // 健康检查只公开本服务标识，不读取凭据、模型或上游状态。
+    if (req.method === 'GET' && url === '/healthz') {
+      return sendJson(res, 200, { status: 'ok', proxy: 'madmodel' });
+    }
+    if (keyDigests.length && !apiKeyAccepted(extractApiKey(req), keyDigests)) {
+      service.logReq(req, 401, started, 0, 'auth-rejected');
+      return openAiError(res, 401, 'API Key 缺失或无效，请检查客户端配置。', 'authentication_error',
+        { 'WWW-Authenticate': 'Bearer realm="madmodel"' });
     }
 
     // 伪造 models 端点(上游不存在该端点,返回 SPA HTML)。附带能力元数据:
@@ -356,8 +365,19 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
       return openAiError(res, 404, '端点不存在。可用:POST /v1/chat/completions,GET /v1/models');
     }
 
-    readChatBody(req, config).then(
-      ({ rawBody, size }) => handleChat(req, res, rawBody, size, started),
+    let reservedBytes = 0;
+    const reserve = size => {
+      const additional = Math.max(0, size - reservedBytes);
+      if (pendingBodyBytes + additional > bodyBudget) {
+        const error = new Error('本地请求容量已满，请降低并发或稍后重试。');
+        error.code = 'BODY_BUSY';
+        throw error;
+      }
+      pendingBodyBytes += additional;
+      reservedBytes += additional;
+    };
+    readChatBody(req, config, reserve).then(
+      ({ rawBody, size }) => handleChat(req, res, rawBody, size, started, startedMonotonic),
       e => handleReadError(req, res, e, started)
     ).catch(e => {
       // 理论上不可达(service 已消解所有已知异常路径),保底防进程崩溃
@@ -365,29 +385,39 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
       if (!res.headersSent) {
         try { openAiError(res, 500, `代理内部错误: ${e?.message || e}`); } catch (e2) { /* 连接已断 */ }
       } else {
-        res.end();
+        endSseError(res, '代理处理流式响应失败，请重试。', 'proxy_error', 500);
       }
+    }).finally(() => {
+      pendingBodyBytes -= reservedBytes;
+      reservedBytes = 0;
     });
   });
 
   // 读取阶段错误的响应映射(鉴权已过;body 层错误在进入业务前挡回)
+  function closeUpload(req, res) {
+    // 让错误响应先发出，再断开未读完的上传；短兜底防止客户端不读响应。
+    res.once('finish', () => req.destroy());
+    setTimeout(() => req.destroy(), 2000).unref();
+  }
+
   function handleReadError(req, res, e, started) {
     if (e.code === 'CLIENT_ABORT') return; // 客户端已断开,无响应可写
+    if (e.code === 'BODY_BUSY') {
+      service.logReq(req, 429, started, e.size || 0, e.message);
+      closeUpload(req, res);
+      openAiError(res, 429, e.message, 'rate_limit', { Connection: 'close' });
+      return;
+    }
     if (e.code === 'BODY_TIMEOUT') {
       service.logReq(req, 408, started, e.size || 0, e.message);
-      openAiError(res, 408, e.message);
-      req.destroy();
+      closeUpload(req, res);
+      openAiError(res, 408, e.message, undefined, { Connection: 'close' });
       return;
     }
     if (e.code === 'BODY_TOO_LARGE') {
       service.logReq(req, 413, started, e.size || 0, e.message);
-      openAiError(res, 413, e.message);
-      if (e.note === 'body-overflow') {
-        // 先让 413 冲出内核缓冲再断开:立即 destroy 会连未发出的响应一起丢掉,
-        // 客户端将看到连接重置而非 413;2s 兜底防客户端无限续传
-        res.once('finish', () => req.destroy());
-        setTimeout(() => { try { req.destroy(); } catch (err) { /* 连接已断 */ } }, 2000).unref();
-      }
+      closeUpload(req, res);
+      openAiError(res, 413, e.message, undefined, { Connection: 'close' });
       return;
     }
     if (e.code === 'EMPTY_BODY') {
@@ -399,7 +429,7 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
   }
 
   // ---- 为 core/proxy-service 构建 ctx:HTTP 细节全部收在这里 ----
-  function handleChat(req, res, rawBody, size, started) {
+  function handleChat(req, res, rawBody, size, started, startedMonotonic) {
     // 上游生命周期:客户端断开/聚合超时都能中止上游,不白烧配额。
     // 服务层与背压等待共用这一个 AbortController
     const ac = new AbortController();
@@ -422,16 +452,33 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
     // 'close' 早已发过,新挂的 drain/close 监听器永不触发,promise 将永久挂起,
     // 该请求从此没有收尾(日志缺失、连接占住 maxConnections 名额)
     const waitDrain = () => {
-      if (clientGone || res.destroyed || res.writableEnded) return Promise.resolve();
-      return new Promise(r => {
-        const done = () => { res.removeListener('drain', done); res.removeListener('close', done); r(); };
+      if (clientGone || res.destroyed || res.writableEnded || ac.signal.aborted) {
+        return Promise.reject(new Error('流式交付已关闭'));
+      }
+      return new Promise((resolve, reject) => {
+        const cleanup = () => {
+          res.removeListener('drain', done);
+          res.removeListener('close', closed);
+          res.removeListener('error', failed);
+          ac.signal.removeEventListener('abort', aborted);
+        };
+        const done = () => { cleanup(); resolve(); };
+        const closed = () => { cleanup(); reject(new Error('流式交付已关闭')); };
+        const failed = error => { cleanup(); reject(error); };
+        const aborted = () => {
+          cleanup();
+          reject(new Error('流式交付已取消'));
+        };
         res.once('drain', done);
-        res.once('close', done);
+        res.once('close', closed);
+        res.once('error', failed);
+        ac.signal.addEventListener('abort', aborted, { once: true });
+        if (ac.signal.aborted) aborted();
       });
     };
 
     const ctx = {
-      req, res, rawBody, size, started,
+      req, res, rawBody, size, started, startedMonotonic,
       abortController: ac,
       clientGone: () => clientGone,
       headersSent: () => res.headersSent,
@@ -462,6 +509,9 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
         return ctx.writeSseLine(`data: ${JSON.stringify(obj)}\n\n`);
       },
       writeSseLine(line) {
+        if (clientGone || res.destroyed || res.writableEnded || ac.signal.aborted) {
+          throw new Error('流式交付已关闭');
+        }
         // Buffer.byteLength:line.length 数的是 UTF-16 码元,中文流的 KB 日志
         // 会偏小约 3 倍
         passthroughBytes += Buffer.byteLength(line);
@@ -470,9 +520,13 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
       endResponse() {
         if (!res.writableEnded) res.end();
       },
+      sendStreamError(message, type, code) {
+        endSseError(res, message, type, code);
+        ac.abort(); // 解除仍在等待 drain 的写入，并取消尚未收尾的上游。
+      },
       // 终态响应面
       sendJson(status, body, headers) { sendJson(res, status, body, headers); },
-      sendError(status, message, type, headers) { openAiError(res, status, message, type, headers); },
+      sendError(status, message, type, headers, code) { openAiError(res, status, message, type, headers, code); },
       // 失败请求体落盘(默认关,隐私考虑:body 含完整对话内容)
       dumpFailed() {
         if (!config.dumpFailed) return;
@@ -518,4 +572,4 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
   };
 }
 
-module.exports = { createHttpServer, createTokenCache, createTokenState, createCredentialWaiter, extractApiKey, apiKeyAccepted };
+module.exports = { createHttpServer, createTokenCache, createTokenState, createCredentialWaiter };
