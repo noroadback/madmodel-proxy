@@ -6,8 +6,8 @@
 // 纪律与 Windows 侧一致的部分:
 //   - 读路径优雅降级:条目不存在/钥匙串锁定时按"无数据"返回 null,不抛——
 //     否则 watch 守护会在第一个 readToken 就崩
-//   - -T /usr/bin/security:允许 security 自身免提示读取(钥匙串锁定时除外),
-//     后台守护无人值守续期依赖这一点
+//   - 创建条目时默认信任创建者 security;更新时保留既有 ACL。
+//     不传 -T 或 -A,避免每次续期修改访问许可或放宽权限;钥匙串锁定时仍可能失败
 // 与 Windows 侧不同的取舍:秘密经 argv 送入 security。macOS 没有 stdin 通道
 // 可喂它,`-i` 交互模式的引号转义语义不可依赖(CI 实测失败);execFileSync
 // 不经 shell、argv 由 execve 原样传递,无解析歧义。代价是秘密在本进程
@@ -40,8 +40,7 @@ function keychainWrite(account, secret) {
   const b64 = Buffer.from(String(secret), 'utf8').toString('base64');
   const args = ['add-generic-password', '-U',
     '-s', SERVICE, '-a', account,
-    '-w', b64,
-    '-T', '/usr/bin/security'];
+    '-w', b64];
   try {
     execFileSync('security', args, { stdio: ['ignore', 'ignore', 'pipe'] });
   } catch (e) {
