@@ -623,71 +623,121 @@ test('逐模型上限: 表里的值不会让"大 max_tokens"被压到撞墙', ()
       '客户端发 ' + sent + ' 被压成 ' + pl.max_tokens + ',仍会撞上游边界');
   }
 });
-// ---- normalizePayload: 对不支持 tool 的上游模型剥离 tool 字段 ----
-// 背景: 部分上游后端(如 DeepSeek-R1-W8A8)不实现 function/tool calling,
-// 收到 tools/tool_calls/tool 消息会抛 Python 异常(can only concatenate str
-// (not "dict") to str) 并以 502 透传给客户端。代理在转发前对这些模型做降级,
-// 剥离 tool 相关字段,避免上游崩溃。命中规则见 core/payload.js 的
-// PROXY_STRIP_TOOLS_FOR(缺省匹配含 "R1" 的模型名)。
-
-test('归一化: 默认规则 /R1/i 对 R1 系模型剥离 tool 相关字段', () => {
-  const p = {
+// ---- 不支持原生工具调用的模型：普通聊天兼容与历史完整性 ----
+function r1ToolHistory(content = null) {
+  return {
     model: 'DeepSeek-R1-W8A8',
     messages: [
-      { role: 'user', content: 'hi' },
-      { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'f', arguments: '{}' } }] },
-      { role: 'tool', content: '20度', tool_call_id: 'c1' },
+      { role: 'user', content: 'Read the record.' },
+      { role: 'assistant', content, tool_calls: [
+        { id: 'c1', type: 'function', function: { name: 'read_record', arguments: '{}' } },
+      ] },
+      { role: 'tool', content: '{"verification_code":"573826"}', tool_call_id: 'c1' },
+      { role: 'user', content: 'What was the verification code?' },
     ],
-    tools: [{ type: 'function', function: { name: 'f' } }],
+    tools: [{ type: 'function', function: { name: 'read_record' } }],
     tool_choice: 'auto',
     parallel_tool_calls: false,
   };
-  const applied = normalizePayload(p, 'DeepSeek-R1-W8A8');
-  assert.strictEqual(p.tools, undefined);
-  assert.strictEqual(p.tool_choice, undefined);
-  assert.strictEqual(p.parallel_tool_calls, undefined);
-  // tool 消息被丢弃;assistant 的 tool_calls 被清掉
-  assert.strictEqual(p.messages.length, 2);
-  assert.strictEqual(p.messages[0].role, 'user');
-  assert.strictEqual(p.messages[1].role, 'assistant');
-  assert.ok(!('tool_calls' in p.messages[1]), 'assistant tool_calls 应被清除');
-  assert.ok(applied.some((n) => n.includes('strip-tools')), '应记录 strip 动作');
+}
+
+for (const content of [null, '', 'I will read the record.']) {
+  test('R1 普通聊天保留工具结果与 assistant 正文: ' + JSON.stringify(content), () => {
+    const p = r1ToolHistory(content);
+    const expected = structuredClone(p.messages);
+    delete expected[1].tool_calls;
+    normalizePayload(p, p.model);
+    assert.deepStrictEqual(p.messages, expected);
+    for (const key of ['tools', 'tool_choice', 'parallel_tool_calls']) {
+      assert.ok(!(key in p), key);
+    }
+  });
+}
+
+test('R1 保留多条工具结果的顺序、名称和调用 ID', () => {
+  const p = r1ToolHistory();
+  p.messages.splice(3, 0, { role: 'tool', tool_call_id: 'c2', name: 'read_file',
+    content: 'path=notes.txt\nThe second result must remain intact.' });
+  p.messages[1].tool_calls.push({ id: 'c2', type: 'function',
+    function: { name: 'read_file', arguments: '{"path":"notes.txt"}' } });
+  const expected = structuredClone(p.messages);
+  delete expected[1].tool_calls;
+  normalizePayload(p, p.model);
+  assert.deepStrictEqual(p.messages, expected);
 });
 
-test('归一化: 非命中模型(如 V4.1)的 tool 字段原样保留', () => {
-  const p = {
-    model: 'DeepSeek-V4.1-Flash',
-    messages: [{ role: 'tool', content: '20度', tool_call_id: 'c1' }],
-    tools: [{ type: 'function', function: { name: 'f' } }],
-    tool_choice: 'auto',
-  };
-  normalizePayload(p, 'DeepSeek-V4.1-Flash');
-  assert.ok(Array.isArray(p.tools) && p.tools.length === 1);
-  assert.strictEqual(p.tool_choice, 'auto');
-  assert.strictEqual(p.messages.length, 1);
-  assert.strictEqual(p.messages[0].role, 'tool');
+test('R1 旧式 function 历史也保留结果正文，只移除调用结构', () => {
+  const p = { model: 'DeepSeek-R1-W8A8', functions: [{ name: 'read_record' }],
+    function_call: 'auto', messages: [
+      { role: 'assistant', content: null, function_call: { name: 'read_record', arguments: '{}' } },
+      { role: 'function', name: 'read_record', content: 'record=573826' },
+    ] };
+  const expected = structuredClone(p.messages);
+  delete expected[0].function_call;
+  normalizePayload(p, p.model);
+  assert.deepStrictEqual(p.messages, expected);
+  assert.ok(!('functions' in p) && !('function_call' in p));
 });
 
-test('归一化: 自定义 PROXY_STRIP_TOOLS_FOR 可扩展命中其它模型', () => {
-  const prev = process.env.PROXY_STRIP_TOOLS_FOR;
-  process.env.PROXY_STRIP_TOOLS_FOR = 'qwen3.8-27b,/R1/i';
-  try {
-    const p = { model: 'qwen3.8-27b', messages: [{ role: 'user', content: 'hi' }], tools: [{ type: 'function', function: { name: 'f' } }] };
-    normalizePayload(p, 'qwen3.8-27b');
-    assert.strictEqual(p.tools, undefined, '自定义规则应剥离 qwen 的 tools');
-  } finally {
-    if (prev === undefined) delete process.env.PROXY_STRIP_TOOLS_FOR; else process.env.PROXY_STRIP_TOOLS_FOR = prev;
+test('R1 普通聊天规则同样移除 required 和指定函数要求', () => {
+  for (const choice of ['required', { type: 'function', function: { name: 'read_record' } }]) {
+    const p = r1ToolHistory();
+    p.tool_choice = choice;
+    normalizePayload(p, p.model);
+    assert.ok(!('tool_choice' in p) && !('tools' in p));
+    assert.strictEqual(p.messages[2].content, '{"verification_code":"573826"}');
   }
 });
 
-test('归一化: PROXY_STRIP_TOOLS_FOR 支持 * 通配', () => {
+test('未命中模型的工具调用与历史保持完整', () => {
+  for (const model of ['DeepSeek-V4.1-Flash', 'qwen3.8-27b']) {
+    const p = r1ToolHistory();
+    p.model = model;
+    const expected = structuredClone(p);
+    normalizePayload(p, model);
+    assert.deepStrictEqual(p.messages, expected.messages);
+    assert.deepStrictEqual(p.tools, expected.tools);
+    assert.strictEqual(p.tool_choice, expected.tool_choice);
+  }
+});
+
+test('R1 没有工具字段的普通聊天不产生剥离记录', () => {
+  const p = { model: 'DeepSeek-R1-W8A8', messages: [{ role: 'user', content: 'Hello' }] };
+  const expected = structuredClone(p);
+  assert.deepStrictEqual(normalizePayload(p, p.model), []);
+  assert.deepStrictEqual(p, expected);
+});
+
+test('模型规则支持精确名称、任意位置通配、含逗号与转义字符的正则', () => {
   const prev = process.env.PROXY_STRIP_TOOLS_FOR;
-  process.env.PROXY_STRIP_TOOLS_FOR = 'DeepSeek-*';
   try {
-    const p = { model: 'DeepSeek-R1-W8A8', messages: [{ role: 'user', content: 'hi' }], tools: [{}] };
-    normalizePayload(p, 'DeepSeek-R1-W8A8');
-    assert.strictEqual(p.tools, undefined, '通配规则应剥离 tools');
+    for (const [pattern, model, strip] of [
+      [' qwen3.8-27b , /R1/i ', 'qwen3.8-27b', true],
+      ['deepseek-r1-w8a8', 'DeepSeek-R1-W8A8', true],
+      ['DeepSeek-*', 'DeepSeek-R1-W8A8', true],
+      ['DeepSeek-*-W8A8', 'DeepSeek-R1-W8A8', true],
+      ['Deep*-*W8*', 'DeepSeek-R1-W8A8', true],
+      ['*R1*', 'DeepSeek-R1-W8A8', true],
+      ['qwen3.8-*', 'qwen3x8-27b', false],
+      ['other,/R[0-9]{1,2}/i,qwen3.8-27b', 'DeepSeek-R1-W8A8', true],
+      ['/R[0-9]{1,2}/i,qwen3.8-27b', 'qwen3.8-27b', true],
+      ['/[/,]R1/i,other', '/R1', true],
+      ['/R1\\/test/i,other', 'R1/test', true],
+      ['/r1/', 'DeepSeek-R1-W8A8', false],
+      ['/r1/i', 'DeepSeek-R1-W8A8', true],
+      ['/R1/z,DeepSeek-*', 'DeepSeek-R1-W8A8', true],
+      ['/(/,DeepSeek-*', 'DeepSeek-R1-W8A8', true],
+      ['/(/', 'DeepSeek-R1-W8A8', false],
+      ['', 'DeepSeek-R1-W8A8', false],
+      [' , ', 'DeepSeek-R1-W8A8', false],
+    ]) {
+      process.env.PROXY_STRIP_TOOLS_FOR = pattern;
+      const p = { model, tools: [{ type: 'function', function: { name: 'read_record' } }] };
+      normalizePayload(p, model);
+      assert.strictEqual(!('tools' in p), strip, pattern + ' -> ' + model);
+    }
   } finally {
-    if (prev === undefined) delete process.env.PROXY_STRIP_TOOLS_FOR; else process.env.PROXY_STRIP_TOOLS_FOR = prev;
+    if (prev === undefined) delete process.env.PROXY_STRIP_TOOLS_FOR;
+    else process.env.PROXY_STRIP_TOOLS_FOR = prev;
   }
 });

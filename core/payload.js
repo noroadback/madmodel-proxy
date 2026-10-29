@@ -1,4 +1,4 @@
-// 请求参数归一化(纯函数,只修改传入 payload,不读环境变量、不做 I/O)。
+// 请求参数归一化：修改传入 payload，工具兼容规则读取环境变量，不做 I/O。
 
 'use strict';
 
@@ -6,6 +6,50 @@ const { applyThinking, readThinkingIntent } = require('./thinking');
 const { estimateVisionBudget } = require('./vision-budget');
 
 const UPSTREAM_REJECTED = ['logprobs', 'top_logprobs'];
+
+// 逗号只分隔模型规则，不能拆开 /R[0-9]{1,2}/i 等正则。
+function toolStripPatterns(raw) {
+  const patterns = [];
+  let start = 0, inRegex = false, inClass = false, escaped = false;
+  for (let i = 0; i <= raw.length; i++) {
+    const c = raw[i];
+    if (i === raw.length || (c === ',' && !inRegex)) {
+      const pattern = raw.slice(start, i).trim();
+      if (pattern) patterns.push(pattern);
+      start = i + 1;
+      inRegex = inClass = escaped = false;
+      continue;
+    }
+    if (i === start && /\s/.test(c)) { start++; continue; }
+    if (i === start && c === '/') { inRegex = true; continue; }
+    if (!inRegex) continue;
+    if (escaped) { escaped = false; continue; }
+    if (c === '\\') { escaped = true; continue; }
+    if (c === '[') inClass = true;
+    else if (c === ']') inClass = false;
+    else if (c === '/' && !inClass) inRegex = false;
+  }
+  return patterns;
+}
+
+function shouldStripTools(model) {
+  if (typeof model !== 'string' || !model) return false;
+  const configured = process.env.PROXY_STRIP_TOOLS_FOR;
+  // 未设置时默认匹配 R1；显式空值关闭兼容规则。
+  return toolStripPatterns(configured === undefined ? '/R1/i' : configured).some(pattern => {
+    if (pattern.startsWith('/')) {
+      const end = pattern.lastIndexOf('/');
+      if (end < 1) return false;
+      try {
+        return new RegExp(pattern.slice(1, end), pattern.slice(end + 1)).test(model);
+      } catch { return false; }
+    }
+    // * 可出现在任意位置，其余字符按字面量匹配。
+    const source = pattern.split('*')
+      .map(part => part.replace(/[.*+?^$(){}|[\]\\]/g, '\\$&')).join('.*');
+    return new RegExp('^' + source + '$', 'i').test(model);
+  });
+}
 
 // JSON 解析与形态校验:非 JSON / 非对象(null/数组/标量)按 400 挡在业务之前。
 // 错误带 code(INVALID_UTF8 / INVALID_JSON / INVALID_PAYLOAD)与面向用户的消息。
@@ -49,46 +93,19 @@ function normalizePayload(payload, model, meta, maxOutputTokens) {
     payload.model = model;
   }
 
-  // 对不支持 tool calling 的上游模型(如 DeepSeek-R1-W8A8)在转发前剥离 tool 相关字段,
-  // 降级为纯文本对话,避免上游后端崩溃(can only concatenate str (not "dict") to str)。
-  // 命中规则:PROXY_STRIP_TOOLS_FOR(逗号分隔;支持 * 通配与 /regex/),缺省匹配含 "R1" 的模型名。
-  {
-    const _env = process.env.PROXY_STRIP_TOOLS_FOR;
-    const _patterns = (_env && _env.trim())
-      ? _env.split(',').map((x) => x.trim()).filter(Boolean)
-      : ['/R1/i'];
-    const _hit = _patterns.some((p) => {
-      if (typeof p === 'string' && p.startsWith('/')) {
-        const _ls = p.lastIndexOf('/');
-        if (_ls > 0) {
-          try { return new RegExp(p.slice(1, _ls), p.slice(_ls + 1) || 'i').test(model); } catch (_) { return false; }
+  // 学校 R1 的 assistant.tool_calls 会触发 dict 拼接错误；已有工具结果可读。
+  // 命中模型按普通聊天处理，但保留消息正文、顺序和 tool/function 结果。
+  if (shouldStripTools(model)) {
+    for (const key of ['tools', 'tool_choice', 'parallel_tool_calls', 'functions', 'function_call']) {
+      if (payload[key] !== undefined) { delete payload[key]; applied.push('-' + key); }
+    }
+    for (const message of Array.isArray(payload.messages) ? payload.messages : []) {
+      if (message?.role !== 'assistant') continue;
+      for (const key of ['tool_calls', 'function_call']) {
+        if (message[key] !== undefined) {
+          delete message[key];
+          applied.push('-assistant.' + key);
         }
-      }
-      if (p.includes('*')) {
-        const lead = p.startsWith('*'), trail = p.endsWith('*');
-        const core = p.replace(/\*/g, '').toLowerCase();
-        const m = String(model).toLowerCase();
-        if (lead && trail) return m.includes(core);
-        if (lead) return m.endsWith(core);
-        if (trail) return m.startsWith(core);
-        return m === core;
-      }
-      return p.toLowerCase() === String(model).toLowerCase();
-    });
-    if (_hit) {
-      for (const k of ['tools', 'tool_choice', 'parallel_tool_calls', 'functions', 'function_call']) {
-        if (payload[k] !== undefined) { delete payload[k]; applied.push(`-${k}`); }
-      }
-      if (Array.isArray(payload.messages)) {
-        const kept = [];
-        for (const m of payload.messages) {
-          if (!m || typeof m !== 'object') { kept.push(m); continue; }
-          if (m.role === 'tool') continue;
-          if (m.tool_calls) { delete m.tool_calls; }
-          kept.push(m);
-        }
-        payload.messages = kept;
-        applied.push('strip-tools(unsupported-model)');
       }
     }
   }
