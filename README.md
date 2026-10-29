@@ -172,6 +172,7 @@ PROXY_PORT=8081 npm start
 | `PROXY_NONSTREAM_TOTAL_MS` | `600000` | 非流式聚合总超时，工具参数重试不重置计时 |
 | `PROXY_TOOL_STREAM` | `incremental` | 工具参数实时转发；`buffered` 在完整校验后交付工具参数 |
 | `PROXY_TOOL_RETRY` | 开启 | `0` 关闭仅剩 `{` 和 JSON 空白的工具参数单次重试及流式 SSE 首段暂存 |
+| `PROXY_STRIP_TOOLS_FOR` | `/R1/i` | 将匹配模型按普通聊天处理；显式空字符串关闭 |
 | `PROXY_RETRY_WAIT_MS` | `30000` | WebVPN 登录重定向后等待新凭据 |
 | `PROXY_REFRESH_AHEAD_MS` | `1800000` | 到期前多久开始续期 |
 | `PROXY_NO_TOKEN_WAIT_MS` | `60000` | 无可用 token 且未配置凭据时的检查间隔 |
@@ -201,6 +202,8 @@ PROXY_PORT=8081 npm start
 <summary>接口兼容说明</summary>
 
 - **请求参数**。`max_completion_tokens` 转为 `max_tokens`；开启思考时，低于 512 的输出预算提升到 512。仅保留单个候选回复，不传递 `logprobs` / `top_logprobs`。
+- **R1 普通聊天兼容**。学校的 R1 后端遇到 `assistant.tool_calls` 历史会报错。默认移除 R1 请求中的顶层工具声明、工具选择参数，以及 assistant 的 `tool_calls` / `function_call`；保留消息正文、顺序和已有 `tool` / `function` 结果及其关联字段。匹配后的请求按普通聊天处理，包括 `tool_choice: required` 或指定函数的请求，不保证调用工具；需要工具执行时请选择支持原生工具调用的模型。
+- **普通聊天模型规则**。`PROXY_STRIP_TOOLS_FOR` 为逗号分隔的规则列表；精确名称和任意位置的 `*` 通配不区分大小写，正则使用 `/regex/flags` 格式并遵循所写 flags，例如 `DeepSeek-*-W8A8,/R[0-9]{1,2}/i`。正则内部的逗号不会分隔规则。未设置时默认 `/R1/i`，显式空字符串关闭；不匹配的模型保留工具字段。
 - **思考字段**。原生 `chat_template_kwargs` 优先于顶层思考参数。Qwen 的 `reasoning` 统一为 `reasoning_content`。
 - **Qwen 缓存隔离**。`qwen3.8-27b` 每次上游请求使用新的 `cache_salt`，以缓解长对话多语言乱码。凭据重试也会更换，客户端提供的盐值会被替换。隔离缓存可能增加首字等待时间，其他模型的盐值原样转发。
 - **响应交付**。常规请求向上游使用 SSE，非流式客户端由代理聚合；兼容上游返回完整 JSON 备用响应。默认实时转发流式正文、思考和原生工具参数。`finish_reason`、用量及 `[DONE]` 在上游正常结束、工具参数通过校验后交付。合法调用若标记为 `stop`，修正为 `tool_calls`；`length` 等其他结束原因保留。实时模式下，仅以 `[DONE]` 结束的合法工具调用补发 `tool_calls`。

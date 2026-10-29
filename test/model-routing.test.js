@@ -149,6 +149,33 @@ test('按客户端选择路由:三个模型各发各的,不再被改写成单一
       assert.ok(!('chat_template_kwargs' in got[0]), 'R1 的 thinkingParam 为 null,不该注入开关');
     });
 
+    await t.test('R1 工具历史经流式和非流式 HTTP 请求转发后仍保留结果', async () => {
+      for (const stream of [true, false]) {
+        for (const content of [null, '']) {
+          got = [];
+          const messages = [
+            { role: 'user', content: 'Read the record.' },
+            { role: 'assistant', content, tool_calls: [{ id: 'c1', type: 'function',
+              function: { name: 'read_record', arguments: '{}' } }] },
+            { role: 'tool', tool_call_id: 'c1', content: '{"verification_code":"573826"}' },
+            { role: 'user', content: 'What was the verification code?' },
+          ];
+          const response = await fetch(url, {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ model: 'DeepSeek-R1-W8A8', messages, stream,
+              tools: [{ type: 'function', function: { name: 'read_record' } }], tool_choice: 'auto' }),
+          });
+          await response.text();
+          assert.strictEqual(response.status, 200);
+          assert.strictEqual(got.length, 1);
+          const expected = structuredClone(messages);
+          delete expected[1].tool_calls;
+          assert.deepStrictEqual(got[0].messages, expected);
+          assert.ok(!('tools' in got[0]) && !('tool_choice' in got[0]));
+        }
+      }
+    });
+
     await t.test('未知模型名照发不误(让上游回"模型不存在",不偷偷换模型)', async () => {
       got = [];
       await chat('no-such-model-xyz');
