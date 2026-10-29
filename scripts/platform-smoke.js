@@ -3,7 +3,8 @@
 // 真实状态目录)。1.4.0 起凭据存储分平台(Windows DPAPI / macOS 钥匙串 /
 // Linux 机器绑定加密),node --check 语法门验证不了这些路径,本脚本在临时
 // 状态目录里验证三件事:
-//   1) 凭据与 token 的写入-读回往返(真实调用当前平台的存储原语)
+//   1) 凭据与 token 的新建、重复更新和读回(真实调用当前平台的存储原语)
+//      macOS 另验证旧版带 -T 创建的条目可直接更新
 //   2) proxy.js 无 token 启动并应答 /v1/models
 //   3) refresh-token.js watch 在无凭据时的调度循环(锁/文件唤醒/调度器)
 // 测试隔离：清理继承的路径与上游覆盖，状态目录及钥匙串每次运行独立。
@@ -137,6 +138,43 @@ async function main() {
     assert(t && t.cookie === 'cookie-►-smoke', 'cookie 往返不一致: 写入 "cookie-►-smoke" 读回 ' + show(t && t.cookie));
     ok('token/cookie 写入-读回往返');
   } catch (e) { bad('token/cookie 写入-读回往返', e); }
+
+  // 只验证首次写入无法发现 macOS -U 搭配 -T 每次更新都会修改 ACL 的问题。
+  try {
+    for (let i = 1; i <= 2; i++) {
+      credentials.writeAccount('smoke-user', `${PW}-${i}`, 'smoke-fp');
+      const expiresAt = Date.now() + 3600e3;
+      credentials.writeToken(`tok-update-${i}`, expiresAt, `cookie-update-${i}`);
+      assert(credentials.readAccount()?.password === `${PW}-${i}`, '重复更新后密码读回不一致');
+      const t = credentials.readToken();
+      assert(t?.token === `tok-update-${i}` && t.expiresAt === expiresAt &&
+        t.cookie === `cookie-update-${i}`, '重复更新后 token/cookie 或有效期不一致');
+    }
+    ok('密码/token/cookie 连续更新后读回一致');
+  } catch (e) { bad('密码/token/cookie 重复更新', e); }
+
+  if (process.platform === 'darwin') {
+    try {
+      // 仅重建本次冒烟的三条测试凭据，复现旧版本创建方式，不需要真实登录。
+      credentials.clearAll();
+      for (const account of ['password', 'token', 'webvpn-cookie']) {
+        secRun(['add-generic-password', '-s', KC_TEST_SERVICE, '-a', account,
+          '-w', secB64(`legacy-${account}`), '-T', '/usr/bin/security']);
+      }
+      credentials.writeAccount('smoke-user', PW, 'smoke-fp');
+      const expiresAt = Date.now() + 3600e3;
+      credentials.writeToken('upgraded-token', expiresAt, 'upgraded-cookie');
+      assert(credentials.readAccount()?.password === PW, '旧条目更新后密码不一致');
+      const t = credentials.readToken();
+      assert(t?.token === 'upgraded-token' && t.expiresAt === expiresAt &&
+        t.cookie === 'upgraded-cookie', '旧条目更新后 token/cookie 或有效期不一致');
+      credentials.writeToken('upgraded-token-again', expiresAt);
+      const again = credentials.readToken();
+      assert(again?.token === 'upgraded-token-again' && again.cookie === 'upgraded-cookie',
+        '未提供 cookie 的再次更新应保留已有 cookie');
+      ok('旧版 -T 条目可直接更新，再次更新保留未改动的 cookie');
+    } catch (e) { bad('macOS 旧版钥匙串条目兼容更新', e); }
+  }
 
   // ---- 1b) macOS 哨兵复核:测试实例的所有操作不得影响任何隔离命名空间 ----
   if (process.platform === 'darwin') {
