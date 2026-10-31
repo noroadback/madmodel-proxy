@@ -144,7 +144,7 @@ module.exports = Object.freeze({
 
   // 请求编码与诊断
   debugBudget: process.env.PROXY_DEBUG_BUDGET === '1', // 预算明细仅在排障时输出
-  diagnosticsEnabled: process.env.PROXY_DIAGNOSTICS === '1', // 仅显式启用故障取证
+  diagnosticsEnabled: process.env.PROXY_DIAGNOSTICS === '1', // 显式启用详细计时与故障取证
   dumpFailed: process.env.DUMP_FAILED === '1',  // 失败请求体落盘(默认关,隐私)
 
   // watch 续期调度

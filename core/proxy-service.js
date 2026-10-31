@@ -8,7 +8,7 @@ const { createAggregator } = require('./completion-aggregator');
 const { countPrompt } = require('./prompt-counter');
 const { getModelMeta } = require('./model-registry');
 const { readReasoningDelta, normalizeCompletionReasoning, normalizeReasoningDelta } = require('./thinking');
-const { startOutputTiming, recordOutput, completeOutputTiming, performanceNote } = require('./request-metrics');
+const { startOutputTiming, recordOutput, completeOutputTiming, performanceNote, phaseNote } = require('./request-metrics');
 const { createHash } = require('crypto');
 const { performance } = require('node:perf_hooks');
 const { failureDiagnosticNote } = require('./failure-diagnostics');
@@ -149,7 +149,8 @@ function createProxyService(deps) {
   }
 
   function requestUsageNote(ctx, usage) {
-    return usageNote(usage) + performanceNote(ctx, usage);
+    return usageNote(usage) + performanceNote(ctx, usage) +
+      (config.diagnosticsEnabled ? phaseNote(ctx) : '');
   }
 
   function authenticateRequest() {

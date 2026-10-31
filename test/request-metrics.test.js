@@ -4,7 +4,7 @@ require('../scripts/isolated-env').isolate();
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { performanceNote, createProxyService } = require('../core/proxy-service');
-const { startOutputTiming, recordOutput, completeOutputTiming } = require('../core/request-metrics');
+const { startOutputTiming, recordOutput, completeOutputTiming, phaseNote } = require('../core/request-metrics');
 const plain = { env: {}, isTTY: false };
 const context = (patch = {}) => ({ outputTiming: { startedAt: 1000, firstAt: 2200,
   completedAt: 5000, ...patch } });
@@ -18,7 +18,8 @@ test('阶段时间区分本地、上传、上游等待、思考与正文；ID �
   recordOutput(ctx, { id: 'chatcmpl-safe', choices: [{ delta: { content: '正文' } }] }, null, 2000);
   completeOutputTiming(ctx, { completedAt: 3000, timing: { startedAt: 1100,
     network: { bodySentMs: 100, headersMs: 600 } } });
-  const result = note(ctx, { completion_tokens: 60 });
+  assert.equal(note(ctx, { completion_tokens: 60 }), ' | 首字 0.8s · 单次输出 50.0 tok/s');
+  const result = phaseNote(ctx);
   assert.match(result, /本地=100ms 分词=80ms 分词排队=20ms 提交=200ms 待上游=500ms/);
   assert.match(result, /思考首段=800ms 正文首段=1000ms 生成=1200ms 背压=25ms/);
   assert.match(result, /上游id=chatcmpl-safe$/);

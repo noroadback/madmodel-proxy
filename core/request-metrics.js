@@ -54,7 +54,7 @@ function performanceNote(ctx, usage, colorOptions) {
   const rate = measurable ? tokens * 1000 / elapsedMs : NaN;
   let output = Number.isFinite(rate) ? `单次输出 ${rate.toFixed(1)} tok/s` : '单次输出 —';
   if (firstValid && completionValid && usageValid && elapsedMs === 0) output += '（时长为0）';
-  return ` | ${first} · ${output}` + phaseNote(ctx);
+  return ` | ${first} · ${output}`;
 }
 
 function phaseNote(ctx) {
