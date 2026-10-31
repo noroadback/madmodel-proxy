@@ -55,8 +55,17 @@ test('八个进程争用旧锁，任一轮只能有一个持有者', { timeout: 
   fs.writeFileSync(file, 'invalid-stale-pid');
   for (let round = 0; round < 8; round++) {
     const result = await Promise.all(workers.map(child => ask(child, 'acquire', file)));
-    assert.equal(result.filter(r => r.ok).length, 1, `第 ${round + 1} 轮必须恰有一个持有者`);
-    const winner = workers[result.findIndex(r => r.ok)];
+    const winners = result.filter(r => r.ok).length;
+    assert.ok(winners <= 1, `第 ${round + 1} 轮不能同时持锁: ${JSON.stringify(result)}`);
+    let winner = workers[result.findIndex(r => r.ok)];
+    if (!winner) {
+      // try-lock 的出票等待有上限；Windows 查询创建时间较慢时可全部暂退。
+      // 暂退必须清完记录，且无竞争时能恢复；不能要求每轮并发都有成功者。
+      assert.equal(fs.readdirSync(`${file}.holders`).length, 0, '暂退不得遗留竞争记录');
+      assert.equal(readLockOwner(file).alive, false, '暂退不得遗留持锁状态');
+      winner = workers[round % workers.length];
+      assert.equal((await ask(winner, 'acquire', file)).ok, true, '并发暂退后必须可重新获取');
+    }
     assert.equal(Number(fs.readFileSync(file, 'utf8')), winner.pid);
     const stillHeld = await Promise.all(workers.map(child => ask(child, 'acquire', file)));
     assert.ok(stillHeld.every(r => !r.ok), '其他进程与持有者自身都不能再次取得同一锁');
