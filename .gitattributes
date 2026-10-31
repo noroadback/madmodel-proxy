@@ -3,7 +3,7 @@
 * text=auto eol=lf
 
 # sm2.js 是 vendored 的第三方产物,其完整性以字节级 sha256 声明(见文件头部
-# 与 README 致谢一节)。禁止任何换行转换,保证任何平台签出后哈希都能核对上
+# 与 THIRD-PARTY-NOTICES.md)。禁止任何换行转换,保证任何平台签出后哈希都能核对上
 sm2.js -text
 
 # Windows 批处理需要 CRLF:部分旧版 cmd.exe 对 LF 结尾的 .cmd 解析异常

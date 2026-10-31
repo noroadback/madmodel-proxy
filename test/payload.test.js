@@ -67,7 +67,7 @@ test('归一化: 调用方给的模型被如实应用(不再固定换成 config.
   assert.strictEqual(q.model, 'qwen3.8-27b');
 });
 
-test('归一化: model 缺省时注入默认值(上游拒绝空 model)', () => {
+test('归一化: 调用方显式提供模型时写入空 payload（不代表生产默认路由）', () => {
   const p = { messages: [] };
   const applied = normalizePayload(p, MODEL);
   assert.strictEqual(p.model, MODEL);
@@ -708,36 +708,31 @@ test('R1 没有工具字段的普通聊天不产生剥离记录', () => {
   assert.deepStrictEqual(p, expected);
 });
 
-test('模型规则支持精确名称、任意位置通配、含逗号与转义字符的正则', () => {
-  const prev = process.env.PROXY_STRIP_TOOLS_FOR;
-  try {
-    for (const [pattern, model, strip] of [
-      [' qwen3.8-27b , /R1/i ', 'qwen3.8-27b', true],
-      ['deepseek-r1-w8a8', 'DeepSeek-R1-W8A8', true],
-      ['DeepSeek-*', 'DeepSeek-R1-W8A8', true],
-      ['DeepSeek-*-W8A8', 'DeepSeek-R1-W8A8', true],
-      ['Deep*-*W8*', 'DeepSeek-R1-W8A8', true],
-      ['*R1*', 'DeepSeek-R1-W8A8', true],
-      ['qwen3.8-*', 'qwen3x8-27b', false],
-      ['other,/R[0-9]{1,2}/i,qwen3.8-27b', 'DeepSeek-R1-W8A8', true],
-      ['/R[0-9]{1,2}/i,qwen3.8-27b', 'qwen3.8-27b', true],
-      ['/[/,]R1/i,other', '/R1', true],
-      ['/R1\\/test/i,other', 'R1/test', true],
-      ['/r1/', 'DeepSeek-R1-W8A8', false],
-      ['/r1/i', 'DeepSeek-R1-W8A8', true],
-      ['/R1/z,DeepSeek-*', 'DeepSeek-R1-W8A8', true],
-      ['/(/,DeepSeek-*', 'DeepSeek-R1-W8A8', true],
-      ['/(/', 'DeepSeek-R1-W8A8', false],
-      ['', 'DeepSeek-R1-W8A8', false],
-      [' , ', 'DeepSeek-R1-W8A8', false],
-    ]) {
-      process.env.PROXY_STRIP_TOOLS_FOR = pattern;
-      const p = { model, tools: [{ type: 'function', function: { name: 'read_record' } }] };
-      normalizePayload(p, model);
-      assert.strictEqual(!('tools' in p), strip, pattern + ' -> ' + model);
+test('模型规则支持精确名称、通配和有效正则，按配置快照应用', () => {
+  const { compileToolStripRules } = require('../core/tool-strip-rules');
+  for (const [pattern, model, strip] of [
+    [' qwen3.8-27b , /R1/i ', 'qwen3.8-27b', true],
+    ['deepseek-r1-w8a8', 'DeepSeek-R1-W8A8', true],
+    ['DeepSeek-*-W8A8', 'DeepSeek-R1-W8A8', true],
+    ['qwen3.8-*', 'qwen3x8-27b', false],
+    ['/R[0-9]{1,2}/i,qwen3.8-27b', 'qwen3.8-27b', true],
+    ['/[/,]R1/i,other', '/R1', true],
+    ['/R1\\/test/i,other', 'R1/test', true],
+    ['/r1/', 'DeepSeek-R1-W8A8', false],
+    ['/r1/ig', 'DeepSeek-R1-W8A8', true],
+    ['', 'DeepSeek-R1-W8A8', false],
+  ]) {
+    const rules = compileToolStripRules(pattern);
+    for (let i = 0; i < 2; i++) {
+      const p = { model, tools: [{}] };
+      normalizePayload(p, model, null, undefined, rules);
+      assert.strictEqual(!('tools' in p), strip, pattern);
     }
-  } finally {
-    if (prev === undefined) delete process.env.PROXY_STRIP_TOOLS_FOR;
-    else process.env.PROXY_STRIP_TOOLS_FOR = prev;
   }
+  for (const raw of ['/R1,other','/R1/z,other','/(/,other','/[abc/']) {
+    assert.throws(() => compileToolStripRules(raw), e => e.code === 'INVALID_TOOL_RULE');
+  }
+  const p = { model: 'Vendor1-Tool-Capable', tools: [{}] };
+  normalizePayload(p, p.model);
+  assert.ok(p.tools, '默认规则不能误伤名称含 r1 的其他模型');
 });

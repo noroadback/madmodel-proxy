@@ -107,8 +107,9 @@ async function logout() {
   }
   // ② watch 在跑?(锁 PID 探活)
   try {
-    const lockPid = processLock.pidOf(fs.readFileSync(WATCH_LOCK, 'utf8'));
-    if (lockPid > 0 && processLock.isAlive(lockPid)) {
+    const owner = processLock.readLockOwner(WATCH_LOCK);
+    const lockPid = owner.pid;
+    if (owner.alive) {
       const e = new Error(`watch 续期守护仍在运行(PID ${lockPid})。请先用 Ctrl+C 停止续期守护,再执行 logout`);
       e.serviceRunning = true;
       throw e;
@@ -139,8 +140,8 @@ async function watch() {
   process.on('exit', () => processLock.releasePidLock(WATCH_LOCK));
   // Windows 陷阱:SIGTERM/SIGHUP 处理器在 Windows 上不被 Node 调用,进程被外部
   // 结束(任务管理器/关窗口/taskkill)时 exit 也来不及跑 → 锁可能残留。
-  // 已由"死 PID 自动接管"兜底:下次启动探活失败即接管,锁残留只推迟一次启动
-  // 判断,不造成死锁。SIGINT(Ctrl+C)在 Windows 控制台有效,保留优雅清理。
+  // 新锁同时校验 PID 与进程创建时间，退出或 PID 复用均可恢复；旧 PID-only
+  // 记录和无法读取身份的进程继续保守判活。SIGINT 保留优雅清理。
   process.on('SIGINT', () => {
     if (activeScheduler) activeScheduler.stop(); // 清理挂起的等待
     processLock.releasePidLock(WATCH_LOCK);
@@ -159,6 +160,10 @@ async function watch() {
     config,
     readToken: () => credentials.readToken(),
     hasCredentials: () => credentials.hasAccount(),
+    readCredentialRevision: () => {
+      try { const s = fs.statSync(CREDS_FILE, { bigint: true }); return `${s.ino}:${s.mtimeNs}:${s.size}`; }
+      catch { return null; }
+    },
     refresh: () => refresh({ interactive: false }),
     wakeup: {
       reset: () => wakeup.reset(),

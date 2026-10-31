@@ -119,17 +119,15 @@ function createTokenizer(model, opts = {}) {
   const RE_MAIN = () => /[!"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~][A-Za-z]+|[^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+| ?[\p{P}\p{S}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+/gu;
 
   // Isolated 切分:匹配段与非匹配段交替成为独立 piece(HF tokenizers Split 行为)
-  function splitIsolated(text, makeRe) {
+  function* splitIsolated(text, makeRe) {
     const re = makeRe();
-    const out = [];
     let last = 0, m;
     while ((m = re.exec(text)) !== null) {
-      if (m.index > last) out.push(text.slice(last, m.index));
-      out.push(m[0]);
+      if (m.index > last) yield text.slice(last, m.index);
+      yield m[0];
       last = m.index + m[0].length;
     }
-    if (last < text.length) out.push(text.slice(last));
-    return out;
+    if (last < text.length) yield text.slice(last);
   }
 
   const pieceCache = new Map(); // piece(byte-level 映射后) -> token 数
@@ -158,14 +156,18 @@ function createTokenizer(model, opts = {}) {
     if (typeof text !== 'string' || text === '') return 0;
     let c = textCache.get(text);
     if (c !== undefined) return c;
-    let pieces = [text];
-    pieces = pieces.flatMap(p => splitIsolated(p, RE_DIGIT));
-    pieces = pieces.flatMap(p => splitIsolated(p, RE_CJK));
-    pieces = pieces.flatMap(p => splitIsolated(p, RE_MAIN));
     c = 0;
-    for (const p of pieces) {
+    // 逐片迭代，不为大文本构造三层片段数组；BPE 之前限制最坏单片工作量。
+    for (const digits of splitIsolated(text, RE_DIGIT))
+    for (const cjk of splitIsolated(digits, RE_CJK))
+    for (const p of splitIsolated(cjk, RE_MAIN)) {
       if (!p) continue;
       if (addedTokens.has(p)) { c += 1; continue; }
+      if (Buffer.byteLength(p, 'utf8') > (opts.maxPieceBytes ?? 32768)) {
+        const error = new Error('单个分词片段超过本地计算预算');
+        error.code = 'TOKENIZER_PIECE_LIMIT';
+        throw error;
+      }
       const bytes = Buffer.from(p, 'utf8');
       let mapped = '';
       for (const b of bytes) mapped += byteToUni.get(b);
@@ -225,6 +227,42 @@ function createTokenizer(model, opts = {}) {
   return { countText, countPromptTokens };
 }
 
+// 用与精确计数相同的字段提取最小工作集。先限制总字符数和片段数，再交 worker。
+// null 表示无法在预算内精确计数，不能当作 token 数参与本地 413 判定。
+function preparePrompt(payload, { maxChars = Infinity, maxParts = Infinity } = {}) {
+  const msgs = Array.isArray(payload?.messages) ? payload.messages : [];
+  if (msgs.length > maxParts) return null;
+  const parts = [];
+  let chars = 0, overhead = 2 + 2 * msgs.length, limited = false;
+  const add = text => {
+    if (typeof text !== 'string' || !text || limited) return;
+    chars += text.length;
+    if (chars > maxChars || parts.length >= maxParts) { limited = true; return; }
+    parts.push(text);
+  };
+  for (const m of msgs) {
+    if (typeof m?.content === 'string') add(m.content);
+    else if (Array.isArray(m?.content)) {
+      if (m.content.length > maxParts) return null;
+      for (const item of m.content) add(item?.text);
+    }
+    if (m?.role === 'assistant') add(readReasoningDelta(m));
+    if (Array.isArray(m?.tool_calls)) {
+      if (m.tool_calls.length > maxParts) return null;
+      overhead += 24 * m.tool_calls.length;
+      for (const tc of m.tool_calls) { add(tc?.function?.name); add(tc?.function?.arguments); }
+    }
+    if (m?.role === 'tool') overhead += 18;
+    if (limited) return null;
+  }
+  if (Array.isArray(payload?.tools)) {
+    if (payload.tools.length > maxParts) return null;
+    overhead += 236 + 2 * payload.tools.length;
+    for (const tool of payload.tools) { add(JSON.stringify(tool)); if (limited) return null; }
+  }
+  return { parts, chars, overhead };
+}
+
 // 默认实例:懒加载 vendor 分词器(7.8MB JSON 解析约 300ms,一次性;启动
 // 预热见 proxy.js)。测试用 createTokenizer 直接注入,不走文件
 let defaultTokenizer = null;
@@ -237,4 +275,4 @@ function getTokenizer() {
   return defaultTokenizer;
 }
 
-module.exports = { createTokenizer, getTokenizer };
+module.exports = { createTokenizer, getTokenizer, preparePrompt };

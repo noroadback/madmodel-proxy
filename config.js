@@ -4,7 +4,7 @@
 'use strict';
 
 const paths = require('./platform/paths');
-const { MADMODEL_VPN_PREFIX, MADMODEL_TUNNEL_MODELS_URL } = require('./madmodel-auth');
+const { MADMODEL_VPN_PREFIX, MADMODEL_TUNNEL_MODELS_URL } = require('./core/auth-shared');
 
 // 解析环境变量中的数字:空/未定义用默认值;非有限数、负数回退默认值;
 // 0 仅在默认值本身为 0 时有意义,其余场景 0 视同非法(避免 0 意外关掉某项
@@ -17,6 +17,21 @@ function numberEnv(name, fallback) {
   return n;
 }
 
+// Node 的 setTimeout 超过此上限会退化到 1ms，不能当作无限等待。
+function millisecondsEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n) || n < 1 || n > 2147483647) {
+    const error = new Error(`${name} 必须是 1～2147483647 的整数毫秒值。`);
+    error.code = 'INVALID_TIMEOUT_CONFIG';
+    throw error;
+  }
+  return n;
+}
+const { compileToolStripRules } = require('./core/tool-strip-rules');
+const toolStripRules = compileToolStripRules(process.env.PROXY_STRIP_TOOLS_FOR);
+
 const PORT = numberEnv('PROXY_PORT', 8080);
 const BODY_LIMIT = numberEnv('PROXY_BODY_LIMIT_MB', 64) * 1024 * 1024;
 
@@ -26,7 +41,7 @@ const API_KEYS = Object.freeze(
   [...new Set((process.env.PROXY_API_KEYS || '').split(',').map(s => s.trim()).filter(Boolean))]
 );
 
-// WebVPN 隧道默认上游:前缀从 madmodel-auth.js 导出(单一来源——上游 URL、
+// WebVPN 隧道默认上游:前缀从 core/auth-shared.js 导出(单一来源——上游 URL、
 // 保活地址推导、cookie 回传判定共用同一常量,复制串漂移会造成"上游是隧道
 // 但保活静默禁用"的错位)
 const DEFAULT_UPSTREAM = `${MADMODEL_VPN_PREFIX}/v1/chat/completions`;
@@ -84,6 +99,7 @@ module.exports = Object.freeze({
   // API Key 列表(空=不鉴权)。adapters/http-server.js 据此决定是否校验。
   apiKeys: API_KEYS,
   model: MODEL,
+  toolStripRules,
   models: Object.freeze([MODEL]),
   // 探测缺失时的思考能力兜底。
   thinkingFallback: THINKING_FALLBACK,
@@ -113,11 +129,11 @@ module.exports = Object.freeze({
   inflightHardLimit: 64,
 
   // 长上下文冷启动实测首字等待超过 160 秒，为预填充留出余量。
-  upstreamHeaderTimeout: numberEnv('PROXY_HEADER_MS', 300e3),
+  upstreamHeaderTimeout: millisecondsEnv('PROXY_HEADER_MS', 300e3),
   // 客户端背压等待不计入上游空闲时间。
-  streamIdleTimeout: numberEnv('PROXY_IDLE_MS', 300e3),
-  streamTotalTimeout: numberEnv('PROXY_STREAM_TOTAL_MS', 1200e3),
-  nonstreamTotalTimeout: numberEnv('PROXY_NONSTREAM_TOTAL_MS', 600e3), // 非流式聚合总超时(实测流式 600s 不断)
+  streamIdleTimeout: millisecondsEnv('PROXY_IDLE_MS', 300e3),
+  streamTotalTimeout: millisecondsEnv('PROXY_STREAM_TOTAL_MS', 1200e3),
+  nonstreamTotalTimeout: millisecondsEnv('PROXY_NONSTREAM_TOTAL_MS', 600e3), // 非流式聚合总超时(实测流式 600s 不断)
   // 默认实时交付工具参数，完整校验后才发成功收尾；旧客户端可完整缓冲。
   toolStreamMode: process.env.PROXY_TOOL_STREAM === 'buffered' ? 'buffered' : 'incremental',
   // 尚未交付的短工具空前缀异常最多重新生成一次；不猜测或补写参数。
@@ -128,22 +144,22 @@ module.exports = Object.freeze({
 
   // 请求编码与诊断
   debugBudget: process.env.PROXY_DEBUG_BUDGET === '1', // 预算明细仅在排障时输出
-  diagnosticsEnabled: process.env.PROXY_DIAGNOSTICS === '1', // 仅显式启用故障取证
+  diagnosticsEnabled: process.env.PROXY_DIAGNOSTICS === '1', // 显式启用详细计时与故障取证
   dumpFailed: process.env.DUMP_FAILED === '1',  // 失败请求体落盘(默认关,隐私)
 
   // watch 续期调度
-  refreshAheadMs: numberEnv('PROXY_REFRESH_AHEAD_MS', 30 * 60 * 1000),
-  noTokenWaitMs: numberEnv('PROXY_NO_TOKEN_WAIT_MS', 60e3),
-  maxSleepMs: numberEnv('PROXY_MAX_SLEEP_MS', 60 * 60 * 1000),
+  refreshAheadMs: millisecondsEnv('PROXY_REFRESH_AHEAD_MS', 30 * 60 * 1000),
+  noTokenWaitMs: millisecondsEnv('PROXY_NO_TOKEN_WAIT_MS', 60e3),
+  maxSleepMs: millisecondsEnv('PROXY_MAX_SLEEP_MS', 60 * 60 * 1000),
   retryBackoffMs: Object.freeze([60e3, 5 * 60e3, 15 * 60e3, 30 * 60e3]),
 
   // 隧道 cookie 可早于 token 失效；定期探活，失效后重签整组凭据。
-  keepAliveIntervalMs: numberEnv('PROXY_KEEPALIVE_MS', 25 * 60 * 1000),
+  keepAliveIntervalMs: millisecondsEnv('PROXY_KEEPALIVE_MS', 25 * 60 * 1000),
   keepaliveUrl: keepaliveMatch ? MADMODEL_TUNNEL_MODELS_URL : null,
 
   // A1 等待重试的等待预算:确认的 WebVPN 会话失效(隧道 3xx)时,代理等
   // watch 重签后重试一次,这里是等待上限(是预算不是恢复时间保证)
-  waitRetryBudgetMs: numberEnv('PROXY_RETRY_WAIT_MS', 30 * 1000),
+  waitRetryBudgetMs: millisecondsEnv('PROXY_RETRY_WAIT_MS', 30 * 1000),
 
   // 连接上限高于业务并发上限，使过载请求仍能收到 429。
   maxConnections: 128,

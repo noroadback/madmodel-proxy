@@ -17,7 +17,7 @@
 
 const fs = require('fs');
 const { execFileSync } = require('child_process');
-const { generateFingerprint } = require('../../madmodel-auth');
+const { generateFingerprint } = require('../../core/auth-shared');
 const { atomicWrite } = require('../file-store');
 const { TOKEN_FILE, CREDS_FILE } = require('../paths');
 

@@ -147,7 +147,7 @@ test('缓存: 片段按字符预算 FIFO 逐出，仍在预算内的片段可复
   const length = 512 * 1024 - 1;
   const pieces = ['a', 'b', 'c'].map(ch => ch.repeat(length));
   const calls = { a: 0, b: 0, c: 0 };
-  const tokenizer = createTokenizer(cacheTestModel, { bpeImpl: piece => {
+  const tokenizer = createTokenizer(cacheTestModel, { maxPieceBytes: Infinity, bpeImpl: piece => {
     if (piece.length === length) calls[piece[0]]++;
     return piece.length;
   } });
@@ -162,7 +162,7 @@ test('缓存: 片段按字符预算 FIFO 逐出，仍在预算内的片段可复
 test('缓存: 超大片段每次照常计数，不挤走已有小片段', () => {
   const oversized = 'x'.repeat(1024 * 1024 + 1);
   let smallCalls = 0, oversizedCalls = 0;
-  const tokenizer = createTokenizer(cacheTestModel, { bpeImpl: piece => {
+  const tokenizer = createTokenizer(cacheTestModel, { maxPieceBytes: Infinity, bpeImpl: piece => {
     if (piece === 'cached') smallCalls++;
     if (piece.length === oversized.length) oversizedCalls++;
     return piece.length;
@@ -184,7 +184,7 @@ test('缓存: 超过整段预算的文本不缓存，且保留已有小文本', 
   )).join('\n');
   assert.ok(oversized.length > 8 * 1024 * 1024);
   let smallCalls = 0, calls = 0;
-  const tokenizer = createTokenizer(cacheTestModel, { bpeImpl: piece => {
+  const tokenizer = createTokenizer(cacheTestModel, { maxPieceBytes: Infinity, bpeImpl: piece => {
     calls++;
     if (piece === 'cached') smallCalls++;
     return piece.length;
@@ -216,7 +216,7 @@ const fsMod = require('fs');
 const pathMod = require('path');
 const modelJson = JSON.parse(fsMod.readFileSync(
   pathMod.join(__dirname, '..', 'vendor', 'deepseek-tokenizer.json'), 'utf8'));
-const tkRef = createTokenizer(modelJson, { bpeImpl: referenceBpe });
+const tkRef = createTokenizer(modelJson, { maxPieceBytes: Infinity, bpeImpl: referenceBpe });
 
 // mulberry32:带种子的 PRNG,失败可复现
 function mulberry32(seed) {

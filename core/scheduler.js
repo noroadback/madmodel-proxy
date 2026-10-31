@@ -9,7 +9,7 @@
 //   - 无 token 且无凭据时按 noTokenWaitMs 等待
 //   - 失败按指数退避;文件事件可提前唤醒检查,但不能绕过退避截止时间
 //   - TWO_FACTOR_REQUIRED 立即停止(抛出,由 CLI 层退出)
-//   - BAD_CREDENTIALS 连续达到上限后停止(抛出)
+//   - 同一份凭据 BAD_CREDENTIALS 累积达到上限后停止(抛出)
 //   - AUTH_BUSY(人工 login 持锁的正常争用)短退避,不吃指数档位
 //   - stop() / 结束时清理 pending 等待;wakeup 由调用方在 finally 关闭
 //
@@ -18,14 +18,14 @@
 //   - 启动时立即探活一次(修复"闲置后启动,cookie 已死"的场景)
 //   - 'invalid' 立刻走 refresh 重签 token+cookie,90 秒后复核新凭据;
 //     重签失败 5 分钟后再探(独立的轻量节奏,不吃主循环退避档位),但
-//     BAD_CREDENTIALS 连续 3 次与主循环同纪律上抛(改了密码等场景,重试
+//     BAD_CREDENTIALS 与主循环共享 3 次预算并上抛(改了密码等场景,重试
 //     无意义,5 分钟一次的完整登录链只会空打 id.tsinghua.edu.cn)
 //   - 'network'(网络抖动)不动凭据,静默等下个周期
 
 'use strict';
 
 class Scheduler {
-  constructor({ config, readToken, hasCredentials, refresh, wakeup, log, logError, now = Date.now }) {
+  constructor({ config, readToken, hasCredentials, refresh, wakeup, log, logError, now = Date.now, readCredentialRevision = () => null }) {
     this.config = config;
     this.readToken = readToken;
     this.hasCredentials = hasCredentials;
@@ -34,22 +34,47 @@ class Scheduler {
     this.log = log || (() => {});
     this.logError = logError || (() => {});
     this.now = now;
+    this.readCredentialRevision = readCredentialRevision;
+    this.credentialRevision = undefined;
+    this.badCredentials = 0;
     this.stopping = false;
     // keepalive: () => 'ok' | 'invalid' | 'network'(协议细节在注入方);
     // 未注入(测试/非隧道上游)时保活整体禁用
     this.keepalive = null;
     this.nextKeepaliveAt = 0;
-    // 保活触发的重签连续 BAD_CREDENTIALS 计数(与主循环 badCredsStreak 同
-    // 语义:非坏凭据的失败清零,连续 3 次上抛)
-    this.keepaliveBadCreds = 0;
+
   }
 
-  // 注入保活探测函数后启用保活;启用即时钟归零、坏凭据计数清零(防御:
-  // 未来若有重启用场景,不残留上次的计数)
+  // 注入保活探测函数后重置探测时钟，保留当前凭据的共享失败预算。
   enableKeepalive(probe) {
     this.keepalive = probe;
     this.nextKeepaliveAt = 0;
-    this.keepaliveBadCreds = 0;
+  }
+
+  syncCredentialRevision() {
+    try {
+      const revision = this.readCredentialRevision();
+      if (revision != null && revision !== this.credentialRevision) {
+        this.badCredentials = 0;
+        this.credentialRevision = revision;
+      }
+    } catch { /* 读取失败不重置已经确认的密码失败。 */ }
+  }
+
+  async refreshWithBudget() {
+    this.syncCredentialRevision();
+    const revision = this.credentialRevision;
+    try {
+      const result = await this.refresh();
+      this.badCredentials = 0;
+      this.syncCredentialRevision();
+      return result;
+    } catch (error) {
+      this.syncCredentialRevision();
+      // 认证期间更新了凭据时，旧凭据的错误不计入新一轮预算。
+      if (error.code === 'BAD_CREDENTIALS' && revision === this.credentialRevision) this.badCredentials++;
+      throw error;
+    }
   }
 
   // 外部 poking:代理侧发现隧道会话被拒(302→/login)时,watch 消费 revive
@@ -87,15 +112,13 @@ class Scheduler {
     }
     this.log('WebVPN 会话已失效，正在续期');
     try {
-      await this.refresh();
-      this.keepaliveBadCreds = 0;
+      await this.refreshWithBudget();
       // 90 秒后复核新 cookie 确已生效,而不是等满一个保活周期
       this.nextKeepaliveAt = this.now() + 90e3;
     } catch (e) {
       if (e.code === 'TWO_FACTOR_REQUIRED') throw e;
-      // 与主循环同纪律:连续 3 次坏凭据上抛停止——继续重试只是空打登录链
-      this.keepaliveBadCreds = e.code === 'BAD_CREDENTIALS' ? this.keepaliveBadCreds + 1 : 0;
-      if (this.keepaliveBadCreds >= 3) throw e;
+      // 与主循环共享预算；网络错误和 AUTH_BUSY 均不清零。
+      if (this.badCredentials >= 3) throw e;
       this.logError('续期失败(' + (e.code || 'unknown') + '): ' + e.message + ',5 分钟后重试');
       this.nextKeepaliveAt = this.now() + 5 * 60e3;
     }
@@ -105,7 +128,6 @@ class Scheduler {
   async run() {
     const { config, wakeup } = this;
     let retryIdx = 0;
-    let badCredsStreak = 0;
     let nextAttemptAt = 0;
 
     for (;;) {
@@ -139,15 +161,13 @@ class Scheduler {
 
       this.log('正在续期');
       try {
-        await this.refresh();
+        await this.refreshWithBudget();
         retryIdx = 0;
-        badCredsStreak = 0;
         // 成功后至少隔 60s 再评估:等延迟的文件事件消化完,避免忙循环
         nextAttemptAt = this.now() + 60e3;
       } catch (e) {
         if (e.code === 'TWO_FACTOR_REQUIRED') throw e;
-        badCredsStreak = e.code === 'BAD_CREDENTIALS' ? badCredsStreak + 1 : 0;
-        if (badCredsStreak >= 3) throw e;
+        if (this.badCredentials >= 3) throw e;
         // AUTH_BUSY 是人工 login 持锁的正常争用:短退避即可,不吃指数退避档位
         const wait = e.code === 'AUTH_BUSY'
           ? 5e3

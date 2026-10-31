@@ -57,7 +57,8 @@ try {
 
 // 3) 敏感文件不在 Git 跟踪列表(误提交即拒绝发布)
 const SENSITIVE = ['token.json', 'creds.json', 'api-key', 'api-keys', 'service.env', 'last-failed-request.json',
-  'watch.lock', 'auth.lock', 'frames.log', 'upstream-frames.log', '_proxy-run.log',
+  'watch.lock', 'auth.lock', 'watch.lock.identity.json', 'auth.lock.identity.json',
+  'frames.log', 'upstream-frames.log', '_proxy-run.log',
   'failure-diagnostics.jsonl', 'failure-diagnostics.jsonl.previous'];
 let tracked = null;
 try {
@@ -119,7 +120,7 @@ if (!match) {
 // 5) .gitignore 覆盖防御性兜底
 const gitignore = fs.readFileSync(path.join(root, '.gitignore'), 'utf8');
 for (const rule of ['node_modules/', 'token.json', 'creds.json', 'api-key',
-  'last-failed-request.json', 'failure-diagnostics.jsonl*', '*.tmp', '*.lock.holders/']) {
+  'last-failed-request.json', 'failure-diagnostics.jsonl*', '*.tmp', '*.lock.holders/', '*.lock.identity.json']) {
   if (gitignore.includes(rule)) ok(`.gitignore 覆盖: ${rule}`);
   else fail(`.gitignore 缺少规则: ${rule}`);
 }

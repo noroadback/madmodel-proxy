@@ -1,37 +1,11 @@
 'use strict';
 
-const { AsyncLocalStorage } = require('node:async_hooks');
-const channels = require('node:diagnostics_channel');
+const { createNetworkTiming } = require('./network-timing');
 const { createHash, randomUUID } = require('node:crypto');
 const { performance } = require('node:perf_hooks');
 const { appendDiagnostic } = require('../platform/diagnostic-store');
 
-const scope = new AsyncLocalStorage();
-const requests = new WeakMap();
-let subscribed = false;
 const knownFinishes = new Set(['stop', 'length', 'tool_calls', 'content_filter']);
-
-function subscribe() {
-  if (subscribed) return;
-  subscribed = true;
-  for (const [name, field] of [['create', 'createdMs'], ['bodySent', 'bodySentMs'], ['headers', 'headersMs']]) {
-    channels.subscribe('undici:request:' + name, message => {
-      // 只跟踪本模块 run() 发出的请求，不收集认证、更新检查或其他 fetch。
-      try {
-        const request = message?.request;
-        if (!request || typeof request !== 'object') return;
-        if (name === 'create') {
-          const trace = scope.getStore();
-          if (trace?.active) requests.set(request, trace);
-        }
-        const trace = requests.get(request);
-        if (trace?.active && trace.network[field] === undefined) {
-          trace.network[field] = Math.max(0, Math.round(performance.now() - trace.started));
-        }
-      } catch { /* 观测不能改变被观测请求 */ }
-    });
-  }
-}
 
 const digest = value => createHash('sha256').update(value, 'utf16le').digest('hex');
 
@@ -127,14 +101,13 @@ class WireAudit {
   }
 }
 
-function createFailureDiagnostics(config) {
+function createFailureDiagnostics(config, timing) {
   if (!config.diagnosticsEnabled) return null;
-  subscribe();
-  const trace = { active: true, started: performance.now(), network: {} };
+  const trace = timing || createNetworkTiming();
   const requestId = randomUUID().replace(/-/g, '').slice(0, 16);
   let audit = null, jsonAudit = null;
   return {
-    run(fn) { return scope.run(trace, fn); },
+    run(fn) { return trace.run(fn); },
     open(isSse) { if (isSse) audit = new WireAudit(config.sseLineLimit); },
     bytes(value) { audit?.push(value); },
     end() { audit?.end(); },
@@ -151,10 +124,9 @@ function createFailureDiagnostics(config) {
       } catch { jsonAudit = { format: 'json', available: false, complete: false, reason: 'invalid-json-or-utf8', tools: [] }; }
     },
     finish(context) {
-      trace.active = false;
-      return { requestId, startedAt: trace.started, elapsedMs: Math.max(0, Math.round(performance.now() - trace.started)),
-        network: { ...trace.network, observed: trace.network.createdMs !== undefined,
-          bodySent: trace.network.bodySentMs !== undefined, headersReceived: trace.network.headersMs !== undefined },
+      const measured = trace.finish();
+      return { requestId, startedAt: trace.startedAt, elapsedMs: Math.max(0, Math.round(performance.now() - trace.startedAt)),
+        network: measured.network,
         phase: context.phase, requestBytes: context.requestBytes, receivedBytes: context.receivedBytes,
         responseStatus: context.responseStatus, wire: audit?.snapshot() || jsonAudit || null };
     },
