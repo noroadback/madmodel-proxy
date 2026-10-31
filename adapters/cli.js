@@ -223,8 +223,8 @@ async function cmdStatus() {
 
   // 3) watch 守护:锁文件 PID 探活(与 acquirePidLock 同一套判定)
   let lockPid = 0;
-  try { lockPid = processLock.pidOf(fs.readFileSync(WATCH_LOCK, 'utf8')); } catch (e) { /* 无锁文件 */ }
-  const watchAlive = lockPid > 0 && processLock.isAlive(lockPid);
+  let watchAlive = false;
+  try { const owner = processLock.readLockOwner(WATCH_LOCK); lockPid = owner.pid; watchAlive = owner.alive; } catch { /* 状态读取失败 */ }
   console.log('watch 续期守护: ' + (watchAlive ? `运行中(PID ${lockPid})`
     : `未运行(随 npm start 启动${lockPid ? ';当前锁文件为死进程残留,下次启动自动接管' : ''})`));
 

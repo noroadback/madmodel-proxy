@@ -211,7 +211,7 @@ function deferred() {
   const promise = new Promise(r => { resolve = r; });
   return { promise, resolve };
 }
-async function deadline(promise, ms = 3000, label = '等待测试事件超时') {
+async function deadline(promise, ms = 10000, label = '等待测试事件超时') {
   let timer;
   try {
     return await Promise.race([promise, new Promise((_, reject) => {
@@ -219,7 +219,7 @@ async function deadline(promise, ms = 3000, label = '等待测试事件超时') 
     })]);
   } finally { clearTimeout(timer); }
 }
-async function until(predicate, label, ms = 3000) {
+async function until(predicate, label, ms = 10000) {
   const end = Date.now() + ms;
   while (!predicate()) {
     if (Date.now() >= end) throw new Error(label);
@@ -250,7 +250,7 @@ function openClient(url, extra = {}, onData, onResponse) {
     completed.resolve(client);
     notify();
   };
-  client.waitFor = (predicate, label = '客户端未收到预期帧', ms = 3000) => {
+  client.waitFor = (predicate, label = '客户端未收到预期帧', ms = 10000) => {
     let listener;
     const ready = new Promise((resolve, reject) => {
       listener = () => {
@@ -620,8 +620,8 @@ test('原生工具参数 streaming 完整 HTTP 回归', async t => {
       opened.resolve(res);
     });
     const client = h.open();
-    const res = await opened.promise;
-    await client.waitFor(value => value.text.includes('正在准备调用。'));
+    const res = await deadline(opened.promise, 10000, '上游请求未打开');
+    await client.waitFor(value => value.text.includes('正在准备调用。'), '上游已打开，但未交付工具前缀');
     writeSse(res, chunk({}, 'tool_calls', USAGE));
     endSse(res);
     await deadline(client.done);

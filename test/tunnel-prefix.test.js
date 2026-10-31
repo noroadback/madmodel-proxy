@@ -2,7 +2,7 @@
 //
 // 编码:hex(IV) + hex(AES-128-CFB(主机名)),密钥与 IV 同为 ASCII 口令
 // "wrdvpnisthebest!"(深信服 wengine 的固定常量,公开实现里通用)。
-// 学校换 madmodel 主机名时:按下面的 derive() 生成新串,替换 madmodel-auth.js 里
+// 学校换 madmodel 主机名时:按下面的 derive() 生成新串,替换 core/auth-shared.js 里
 // 的 MADMODEL_VPN_PREFIX / INFO_PREFIX。
 //
 // 为什么要钉住:mapRoamingUrl 曾把 HASH 当 UTF-8 解码(得出口令 + 密文乱码),
@@ -37,7 +37,7 @@ test('隧道前缀 HASH = hex(口令) + hex(AES-128-CFB(主机名))', () => {
 });
 
 test('源码里的每个隧道 HASH 都以口令的十六进制开头', () => {
-  const source = fs.readFileSync(path.join(__dirname, '..', 'madmodel-auth.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '..', 'core', 'auth-shared.js'), 'utf8');
   const hashes = [...source.matchAll(/\/https\/([0-9a-f]{64,})/g)].map(m => m[1]);
   assert.ok(hashes.length >= 2, `源码里没扫到隧道 HASH(实际 ${hashes.length} 个)`);
   for (const hash of hashes) {

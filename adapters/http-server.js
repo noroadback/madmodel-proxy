@@ -13,7 +13,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { performance } = require('node:perf_hooks');
 const { validateListenConfig } = require('../core/listen-config');
-const { jwtExpiresAt } = require('../madmodel-auth');
+const { jwtExpiresAt } = require('../core/auth-shared');
 const credentials = require('../platform/credentials');
 const { atomicWrite } = require('../platform/file-store');
 const { normalizeReasoningDelta } = require('../core/thinking');
@@ -381,9 +381,9 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
       e => handleReadError(req, res, e, started)
     ).catch(e => {
       // 理论上不可达(service 已消解所有已知异常路径),保底防进程崩溃
-      service.logReq(req, 500, started, e?.size || 0, `proxy-panic:${String(e?.message || e).slice(0, 60)}`);
+      service.logReq(req, 500, started, e?.size || 0, 'proxy-panic:internal-error');
       if (!res.headersSent) {
-        try { openAiError(res, 500, `代理内部错误: ${e?.message || e}`); } catch (e2) { /* 连接已断 */ }
+        try { openAiError(res, 500, '代理内部错误，请重试；如持续发生，请检查代理日志。'); } catch (e2) { /* 连接已断 */ }
       } else {
         endSseError(res, '代理处理流式响应失败，请重试。', 'proxy_error', 500);
       }
@@ -515,7 +515,13 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
         // Buffer.byteLength:line.length 数的是 UTF-16 码元,中文流的 KB 日志
         // 会偏小约 3 倍
         passthroughBytes += Buffer.byteLength(line);
-        if (!res.write(line)) return waitDrain();
+        if (!res.write(line)) {
+          const blockedAt = performance.now();
+          return waitDrain().finally(() => {
+            ctx.requestTiming ||= { drainMs: 0 };
+            ctx.requestTiming.drainMs += performance.now() - blockedAt;
+          });
+        }
       },
       endResponse() {
         if (!res.writableEnded) res.end();

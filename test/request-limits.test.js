@@ -37,10 +37,16 @@ function loadConfig(values = {}) {
   }
 }
 
-test('请求限制默认值、环境覆盖与非法值回退', () => {
-  for (const value of [undefined, '', '0', '-1', 'NaN', 'Infinity']) {
+test('请求限制默认值、环境覆盖；容量非法值回退，时限非法值拒绝启动', () => {
+  for (const value of [undefined, '']) {
     const cfg = loadConfig(Object.fromEntries(SETTINGS.map(([key]) => [key, value])));
     for (const [key, field, fallback] of SETTINGS) assert.equal(cfg[field], fallback, `${key}=${value}`);
+  }
+  for (const value of ['0', '-1', 'NaN', 'Infinity']) {
+    const cfg = loadConfig({ PROXY_BODY_LIMIT_MB: value, PROXY_BODY_BUDGET_MB: value });
+    assert.equal(cfg.bodyLimit, 64 * 1048576);
+    assert.equal(cfg.bodyBudget, 256 * 1048576);
+    assert.throws(() => loadConfig({ PROXY_HEADER_MS: value }), { code: 'INVALID_TIMEOUT_CONFIG' });
   }
   const cfg = loadConfig({ PROXY_BODY_LIMIT_MB: '1.5', PROXY_HEADER_MS: '4321',
     PROXY_IDLE_MS: '5678' });
@@ -133,6 +139,80 @@ async function bodyServer(t, handleRequest, overrides = {}) {
   await listen(server);
   return server;
 }
+
+test('HTTP 内部异常不泄露凭据或路径，故障后容量额度可重用', async t => {
+  const logs = [];
+  let calls = 0;
+  const { server } = createHttpServer({ config: { ...config, bodyLimit: 64, bodyBudget: 64 },
+    getToken: () => null, service: { logReq(...args) { logs.push(args); }, async handleRequest(ctx) {
+      if (++calls === 1) throw new Error('SECRET_TOKEN file=C:/private/creds.json');
+      ctx.sendJson(200, { ok: true });
+    } } });
+  await listen(server);
+  t.after(() => close(server));
+  const result = await upload(server.address().port, Buffer.alloc(64, 32), false);
+  assert.equal(result.status, 500);
+  assert.doesNotMatch(JSON.stringify(result.body) + JSON.stringify(logs.map(args => args.slice(1))), /SECRET_TOKEN|private|creds.json/);
+  assert.equal((await upload(server.address().port, Buffer.alloc(64, 32), false)).status, 200);
+});
+
+test('计数不可用时，上游繁忙不根据缺失的预算证据改写为 413', async t => {
+  const logs = [];
+  t.mock.method(console, 'log', (...args) => logs.push(args.join(' ')));
+  const cfg = { ...config, debugBudget: true,
+    limitsFor: () => ({ contextWindow: 1024, maxOutputTokens: 2048 }) };
+  const service = createProxyService({ config: cfg,
+    tokenState: () => ({ token: 'synthetic', expiresAt: Date.now() + 60000 }),
+    countPrompt: async () => ({ exact: false, reason: 'worker-timeout' }),
+    upstreamClient: { async request() { return { type: 'upstream-error', status: 200,
+      body: { errorMessage: '服务器繁忙' } }; } } });
+  const { server } = createHttpServer({ config: cfg, service, getToken: () => null });
+  await listen(server);
+  t.after(() => close(server));
+  for (const stream of [false, true]) {
+    const response = await upload(server.address().port, Buffer.from(JSON.stringify({
+      model: 'unknown', max_tokens: 2048, stream, messages: [{ role: 'user', content: 'hello' }] })), false);
+    assert.equal(response.status, 429);
+    assert.doesNotMatch(response.body.error.message, /超限/);
+  }
+  assert.doesNotMatch(logs.join('\n'), /文本=0|疑似上下文超限/);
+});
+
+test('病态长输入交给上游预算校验，不阻塞健康检查或误报本地 413', { timeout: 20000 }, async t => {
+  const { PromptCounter } = require('../core/prompt-counter');
+  const counter = new PromptCounter();
+  t.after(() => counter.close());
+  const counting = deferred();
+  const text = '中'.repeat(2 * 1024 * 1024);
+  let upstreamCalls = 0;
+  const cfg = { ...config, limitsFor: () => ({ contextWindow: 1024, maxOutputTokens: 100 }) };
+  const service = createProxyService({ config: cfg,
+    tokenState: () => ({ token: 'synthetic', expiresAt: Date.now() + 60000 }),
+    countPrompt: (body, opts) => { const result = counter.count(body, opts); counting.resolve(); return result; },
+    upstreamClient: { async request({ payload }) {
+      upstreamCalls++;
+      assert.equal(payload.messages[0].content, text);
+      assert.equal(payload.max_tokens, 100);
+      return { type: 'completion', body: { id: 'fake', choices: [{ message: { role: 'assistant', content: 'ok' },
+        finish_reason: 'stop' }], usage: { prompt_tokens: 2000000, completion_tokens: 1 } } };
+    } } });
+  const { server } = createHttpServer({ config: cfg, service, getToken: () => null });
+  await listen(server);
+  t.after(() => close(server));
+  const request = upload(server.address().port, Buffer.from(JSON.stringify({ model: 'DeepSeek-V4.1-Flash',
+    max_tokens: 100, messages: [{ role: 'user', content: text }] })), false);
+  await within(counting.promise);
+  const start = performance.now();
+  const health = await within(new Promise((resolve, reject) => {
+    http.get(`http://127.0.0.1:${server.address().port}/healthz`, { headers: { Host: 'localhost' } }, res => {
+      res.resume(); res.on('end', () => resolve(res.statusCode));
+    }).on('error', reject);
+  }), 2000);
+  t.diagnostic(`health during 6 MiB CJK input: ${Math.round(performance.now() - start)}ms`);
+  assert.equal(health, 200);
+  assert.equal((await within(request, 10000)).status, 200);
+  assert.equal(upstreamCalls, 1);
+});
 
 test('请求体总预算覆盖业务处理阶段，成功及异常结束后均可重用', async t => {
   for (const chunked of [false, true]) for (const fail of [false, true]) {

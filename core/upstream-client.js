@@ -40,6 +40,7 @@ const { randomUUID } = require('crypto');
 const { performance } = require('node:perf_hooks');
 const { SseParser } = require('./stream-parser');
 const { createFailureDiagnostics } = require('./failure-diagnostics');
+const { createNetworkTiming } = require('./network-timing');
 
 // 限量读:错误页/直答异常膨胀时及时放弃,不无限缓冲(超限抛 UPSTREAM_BODY_LIMIT)
 async function readLimited(reader, limit, onProgress) {
@@ -99,7 +100,8 @@ function createUpstreamClient(config) {
 
   function request({ payload, token, cookie, signal, onChunk, onOpen }) {
     return new Promise((resolve) => {
-      const diagnostics = createFailureDiagnostics(config);
+      const timing = createNetworkTiming();
+      const diagnostics = createFailureDiagnostics(config, timing);
       // 零字节截断时"已等待多久"的计时起点(见 truncated 结果的 idleMs)
       const requestStart = Date.now();
       // 单一 AbortController:外部 signal(客户端断开/聚合超时)与 header 超时
@@ -134,6 +136,8 @@ function createUpstreamClient(config) {
         clearTimeout(idleTimer);
         clearTimeout(totalTimer);
         if (signal) signal.removeEventListener('abort', onAbort);
+        // 内部观测元数据不进入结果枚举/JSON，保持既有结果契约。
+        Object.defineProperty(v, 'timing', { value: timing.finish() });
         if (diagnostics) v.diagnostics = diagnostics.finish({ phase, requestBytes, receivedBytes, responseStatus });
         resolve(v);
       };
@@ -193,7 +197,7 @@ function createUpstreamClient(config) {
           redirect: 'manual',
           signal: lifecycle.signal,
         });
-        const up = await (diagnostics ? diagnostics.run(fetchRequest) : fetchRequest());
+        const up = await timing.run(fetchRequest);
         clearTimeout(headerTimer);
         upBody = up.body;
         phase = 'response-body';

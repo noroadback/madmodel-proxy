@@ -84,7 +84,7 @@ test('服务日志: 实时原生工具按上游首字到DONE计算速度，思�
   assert.equal(forwardedBeforeDone, true, '工具参数实时交付');
   assert.ok(ctx.out.lines.includes('data: [DONE]\n\n'));
   assert.match(log, /token 200\/100\(思考 80\) 累计 200\/100/);
-  assert.match(log, /首字 1\.2s · 输出 35\.7 tok\/s$/);
+  assert.match(log, /首字 1\.2s · 单次输出 35\.7 tok\/s 阶段\[/);
 });
 
 test('服务日志: buffered工具按上游观察区间计算，交付缓冲不屏蔽速度', async t => {
@@ -96,7 +96,7 @@ test('服务日志: buffered工具按上游观察区间计算，交付缓冲不�
     } });
   assert.equal(ctx.out.chunks.some(hasTool), true, '校验完成后交付工具');
   assert.ok(ctx.out.lines.includes('data: [DONE]\n\n'));
-  assert.match(log, /首字 1\.2s · 输出 35\.7 tok\/s$/);
+  assert.match(log, /首字 1\.2s · 单次输出 35\.7 tok\/s 阶段\[/);
 });
 
 test('服务日志: 非流式聚合使用观察到的上游输出时间与实际用量', async t => {
@@ -105,7 +105,7 @@ test('服务日志: 非流式聚合使用观察到的上游输出时间与实际
   assert.equal(ctx.out.status, 200);
   assert.equal(ctx.out.body.choices[0].message.tool_calls[0].function.arguments, '{"answer":42}');
   assert.deepEqual(ctx.out.body.usage, usage);
-  assert.match(log, /首字 1\.2s · 输出 35\.7 tok\/s$/);
+  assert.match(log, /首字 1\.2s · 单次输出 35\.7 tok\/s 阶段\[/);
 });
 
 test('服务日志: DONE之后的本地终帧冲刷延迟不计入输出速度', async t => {
@@ -121,7 +121,7 @@ test('服务日志: DONE之后的本地终帧冲刷延迟不计入输出速度',
     } });
   assert.equal(delayed, true);
   assert.equal(ctx.out.ended, true);
-  assert.match(log, /首字 1\.2s · 输出 35\.7 tok\/s$/);
+  assert.match(log, /首字 1\.2s · 单次输出 35\.7 tok\/s 阶段\[/);
 });
 
 test('服务日志: include_usage:false缺少token时首字可见，速度不按字符或帧数猜测', async t => {
@@ -134,7 +134,7 @@ test('服务日志: include_usage:false缺少token时首字可见，速度不按
   assert.equal(seen[0].stream_options.include_usage, false);
   assert.equal(ctx.out.ended, true);
   assert.doesNotMatch(log, /token \d/);
-  assert.match(log, /首字 1\.2s · 输出 —$/);
+  assert.match(log, /首字 1\.2s · 单次输出 — 阶段\[/);
 });
 
 test('服务日志: 有效输出短间隔不屏蔽速度，分母仍截止DONE', async t => {
@@ -142,14 +142,14 @@ test('服务日志: 有效输出短间隔不屏蔽速度，分母仍截止DONE',
     delta({ content: '最后一段' }, 2250),
     { at: 4800, chunk: { choices: [], usage: { prompt_tokens: 200, completion_tokens: 100 } } }],
     response: { type: 'stream', usage: { prompt_tokens: 200, completion_tokens: 100 }, completedAt: 5000 } });
-  assert.match(log, /首字 1\.2s · 输出 35\.7 tok\/s$/);
+  assert.match(log, /首字 1\.2s · 单次输出 35\.7 tok\/s 阶段\[/);
 });
 
 test('服务日志: 未收到思考文本仍按约定公式显示可观察输出的近似速度', async t => {
   const { log } = await run(t, { events: [delta({ content: '结果' }, 2200),
     delta({ content: '完成' }, 4500), { at: 4800, chunk: { choices: [], usage } }] });
   assert.match(log, /token 200\/100\(思考 80\)/);
-  assert.match(log, /首字 1\.2s · 输出 35\.7 tok\/s$/);
+  assert.match(log, /首字 1\.2s · 单次输出 35\.7 tok\/s 阶段\[/);
 });
 
 for (const stream of [true, false]) {
@@ -160,6 +160,6 @@ for (const stream of [true, false]) {
     } });
     if (stream) assert.ok(ctx.out.lines.includes('data: [DONE]\n\n'));
     else assert.equal(ctx.out.status, 200);
-    assert.match(log, /首字 — · 输出 —$/);
+    assert.match(log, /首字 — · 单次输出 — 阶段\[/);
   });
 }

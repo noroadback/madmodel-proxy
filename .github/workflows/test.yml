@@ -29,8 +29,8 @@ jobs:
         run: |
           node -e "const fs=require('fs'),path=require('path');const files=[];const walk=d=>{for(const e of fs.readdirSync(d,{withFileTypes:true})){if(e.isDirectory()){if(e.name!=='node_modules')walk(path.join(d,e.name))}else if(e.name.endsWith('.js'))files.push(path.join(d,e.name))}};walk('.');for(const f of files)require('child_process').execFileSync(process.execPath,['--check',f],{stdio:'inherit'})"
 
-      # 纯函数层(payload/aggregator/stream-parser/errors/tokenizer/update-check)
-      # 与 mock 上游集成测试(upstream-integration),零真实 I/O;
+      # 自动运行 test/ 中全部离线测试，包含纯逻辑、隔离存储、子进程与本机假上游。
+      # 不访问真实认证或模型服务；测试清单不在注释中重复维护。
       # 协议行为(未知帧型/网关形态)不在此处——那是 smoke-real.js 的职责,
       # 有意不进 CI(访问真实校方服务并消耗配额)
       # Node 18 规避:--test 的父进程 TAP 解析器对非 ASCII 测试名崩溃
@@ -73,3 +73,5 @@ jobs:
       # 加密)的写入-读回往返、proxy 无 token 启动探活、watch 守护调度循环
       - name: Platform smoke
         run: node scripts/platform-smoke.js
+      - name: Process identity, launcher and worker regressions
+        run: node --test test/process-lock.test.js test/launcher-paths.test.js test/logout-lock-gate.test.js test/prompt-counter.test.js

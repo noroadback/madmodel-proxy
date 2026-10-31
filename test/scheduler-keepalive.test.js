@@ -110,10 +110,10 @@ test('重签连续 3 次 BAD_CREDENTIALS:与主循环同纪律上抛停止', asy
     refreshErr: Object.assign(new Error('bad creds'), { code: 'BAD_CREDENTIALS' }),
   });
   await s.runKeepaliveIfDue();   // 第 1 次:5 分钟重试
-  assert.strictEqual(s.keepaliveBadCreds, 1);
+  assert.strictEqual(s.badCredentials, 1);
   advance(RETRY_5M);
   await s.runKeepaliveIfDue();   // 第 2 次
-  assert.strictEqual(s.keepaliveBadCreds, 2);
+  assert.strictEqual(s.badCredentials, 2);
   advance(RETRY_5M);
   await assert.rejects(          // 第 3 次:上抛,不再空打登录链
     () => s.runKeepaliveIfDue(),
@@ -121,7 +121,7 @@ test('重签连续 3 次 BAD_CREDENTIALS:与主循环同纪律上抛停止', asy
   );
 });
 
-test('非坏凭据的重签失败清零计数(与主循环 badCredsStreak 同语义)', async () => {
+test('网络错误和认证争用不清零共享密码失败预算', async () => {
   let calls = 0;
   const { s, advance } = makeScheduler({ verdict: 'invalid' });
   s.refresh = async () => {
@@ -130,10 +130,10 @@ test('非坏凭据的重签失败清零计数(与主循环 badCredsStreak 同语
     throw Object.assign(new Error('net'), { code: 'AUTH_BUSY' });
   };
   await s.runKeepaliveIfDue();   // BAD_CREDENTIALS → 1
-  assert.strictEqual(s.keepaliveBadCreds, 1);
+  assert.strictEqual(s.badCredentials, 1);
   advance(RETRY_5M);
-  await s.runKeepaliveIfDue();   // AUTH_BUSY → 清零
-  assert.strictEqual(s.keepaliveBadCreds, 0);
+  await s.runKeepaliveIfDue();   // AUTH_BUSY → 保留
+  assert.strictEqual(s.badCredentials, 1);
 });
 
 test('重签成功后计数清零', async () => {
@@ -146,7 +146,7 @@ test('重签成功后计数清零', async () => {
   await s.runKeepaliveIfDue();   // 失败 → 1
   advance(RETRY_5M);
   await s.runKeepaliveIfDue();   // 成功 → 0
-  assert.strictEqual(s.keepaliveBadCreds, 0);
+  assert.strictEqual(s.badCredentials, 0);
 });
 
 test('pokeKeepalive:时钟拉回当前,未到期的探活立即执行(网络切换快速自愈)', async () => {
@@ -180,4 +180,40 @@ test("verdict 'invalid' + 重签抛 TWO_FACTOR_REQUIRED:上抛交给上层处理
     refreshErr: Object.assign(new Error('mfa'), { code: 'TWO_FACTOR_REQUIRED' }),
   });
   await assert.rejects(() => s.runKeepaliveIfDue(), (e) => e.code === 'TWO_FACTOR_REQUIRED');
+});
+
+test('保活与主循环共享三次密码失败预算，网络失败和 AUTH_BUSY 都不能绕过', async () => {
+  const errors = ['BAD_CREDENTIALS', 'NETWORK_ERROR', 'BAD_CREDENTIALS', 'AUTH_BUSY', 'BAD_CREDENTIALS'];
+  let calls = 0, time = 0;
+  const s = new Scheduler({ config: { keepAliveIntervalMs: 1000, refreshAheadMs: 0,
+    retryBackoffMs: [1], maxSleepMs: 1, noTokenWaitMs: 1 }, now: () => time,
+    readToken: () => null, hasCredentials: () => true,
+    refresh: async () => { const code = errors[calls++]; throw Object.assign(new Error(code), { code }); },
+    wakeup: { reset() {}, close() {}, async wait(ms) { time += ms; } } });
+  s.enableKeepalive(async () => 'invalid');
+  await s.runKeepaliveIfDue();
+  assert.strictEqual(s.badCredentials, 1);
+  await assert.rejects(() => s.run(), { code: 'BAD_CREDENTIALS' });
+  assert.strictEqual(calls, 5);
+  assert.strictEqual(s.badCredentials, 3);
+});
+
+test('凭据版本变化才重置失败预算，读取失败保留；旧凭据晚到错误不惩罚新凭据', async () => {
+  const { s } = makeScheduler({ verdict: 'invalid' });
+  let revision = 'first';
+  s.readCredentialRevision = () => revision;
+  const bad = () => { throw Object.assign(new Error('bad'), { code: 'BAD_CREDENTIALS' }); };
+  s.refresh = async () => bad();
+  for (let i = 0; i < 2; i++) await assert.rejects(() => s.refreshWithBudget());
+  assert.strictEqual(s.badCredentials, 2);
+  s.readCredentialRevision = () => { throw new Error('temporary access failure'); };
+  s.syncCredentialRevision();
+  assert.strictEqual(s.badCredentials, 2);
+  s.readCredentialRevision = () => revision;
+  revision = 'second';
+  await assert.rejects(() => s.refreshWithBudget());
+  assert.strictEqual(s.badCredentials, 1);
+  s.refresh = async () => { revision = 'third'; bad(); };
+  await assert.rejects(() => s.refreshWithBudget());
+  assert.strictEqual(s.badCredentials, 0);
 });

@@ -145,7 +145,7 @@ test('上游错误判定集成矩阵(mock 上游 + 完整代理实例)', async t
         });
         assert.strictEqual((await chat(true)).status, 200);
       } finally { console.log = originalLog; }
-      assert.match(lines.find(line => line.includes('token 1/1')), /首字 \d+\.\ds · 输出 \d+\.\d tok\/s/);
+      assert.match(lines.find(line => line.includes('token 1/1')), /首字 \d+\.\ds · 单次输出 \d+\.\d tok\/s/);
     });
 
     await t.test('上游JSON回退不伪造首字或输出速度', async () => {
@@ -162,7 +162,7 @@ test('上游错误判定集成矩阵(mock 上游 + 完整代理实例)', async t
       } finally { console.log = originalLog; }
       const completed = lines.filter(line => line.includes('token 1/1'));
       assert.strictEqual(completed.length, 2);
-      for (const line of completed) assert.match(line, /首字 — · 输出 —/);
+      for (const line of completed) assert.match(line, /首字 — · 单次输出 —/);
     });
 
     await t.test('首字从HTTP入口计时，慢速上传不会被统计起点漏掉', async () => {

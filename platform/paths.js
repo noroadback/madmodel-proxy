@@ -1,7 +1,7 @@
 // platform/paths.js
 // 状态目录、各状态文件路径——全项目唯一来源。platform 层允许读取
 // process.env(core 层禁止);此前的分散计算曾导致口径漂移。
-// start.cmd 无法 require 本模块,目录名在其中有一份硬编码,改名需两处同步。
+// start.cmd 通过 scripts/shortcut-state.js 使用同一状态目录。
 
 'use strict';
 

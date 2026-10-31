@@ -5,7 +5,7 @@
 const { normalizePayload, parseJsonBody, fitTokenBudget, estimatePromptBudget } = require('./payload');
 const { translateUpstreamError, describeFailedStream } = require('./errors');
 const { createAggregator } = require('./completion-aggregator');
-const { getTokenizer } = require('./tokenizer');
+const { countPrompt } = require('./prompt-counter');
 const { getModelMeta } = require('./model-registry');
 const { readReasoningDelta, normalizeCompletionReasoning, normalizeReasoningDelta } = require('./thinking');
 const { startOutputTiming, recordOutput, completeOutputTiming, performanceNote } = require('./request-metrics');
@@ -181,7 +181,7 @@ function createProxyService(deps) {
     const model = requestedModel(payload);
     const limits = typeof config.limitsFor === 'function' ? config.limitsFor(model) : null;
     normalizePayload(payload, model, metaFor(model),
-      limits ? limits.maxOutputTokens : undefined);
+      limits ? limits.maxOutputTokens : undefined, config.toolStripRules);
     return {
       payload, clientWantsStream,
       contextWindow: limits ? limits.contextWindow : config.contextWindow,
@@ -245,6 +245,8 @@ function createProxyService(deps) {
   }
 
   async function handleRequest(ctx) {
+    ctx.startedMonotonic ??= performance.now();
+    ctx.requestTiming ||= { drainMs: 0 };
     const auth = authenticateRequest();
     if (auth.error) {
       logReq(ctx.req, auth.error.status, ctx.started, ctx.size, auth.error.message);
@@ -278,10 +280,14 @@ function createProxyService(deps) {
       }
       const { clientWantsStream, contextWindow, promptTokenMarginRatio } = prepared;
       payload = prepared.payload;
-      const promptTokens = getTokenizer().countPromptTokens(payload);
+      const counted = await (deps.countPrompt || countPrompt)(payload, { signal: ac.signal });
+      if (ctx.clientGone() || ac.signal.aborted) return;
+      ctx.promptCount = counted;
+      const promptTokens = counted.exact ? counted.tokens : 0;
       const estimate = estimatePromptBudget(payload, promptTokens, promptTokenMarginRatio);
-      const fit = fitTokenBudget(promptTokens, payload, contextWindow, estimate);
-      if (config.debugBudget) {
+      // 资源保护触发时只放弃本地预算预检；不把字节估算当精确计数误拒请求。
+      const fit = counted.exact ? fitTokenBudget(promptTokens, payload, contextWindow, estimate) : { ok: true, note: '' };
+      if (config.debugBudget && counted.exact) {
         // 100 仅为日志阶段标记；本地拒绝、上游拒绝和断流均保留预算依据。
         const outputBudgetForLog = payload.max_tokens === undefined ? '未指定'
           : typeof payload.max_tokens === 'number' && Number.isFinite(payload.max_tokens)
@@ -297,11 +303,13 @@ function createProxyService(deps) {
         logReq(ctx.req, 413, ctx.started, ctx.size, fit.message, payload.model);
         return ctx.sendError(413, fit.message);
       }
-      const budgetNote = config.debugBudget && fit.note ? ` 输出预算 ${payload.max_tokens}` : '';
-      const budgetHint = {
+      const budgetNote = !counted.exact ? ` 预算预检=上游(${counted.reason})`
+        : config.debugBudget && fit.note ? ` 输出预算 ${payload.max_tokens}` : '';
+      const budgetHint = counted.exact ? {
         ...estimate, promptTokens, contextWindow,
         tokenBudget: typeof payload.max_tokens === 'number' ? payload.max_tokens : 0,
-      };
+      } : undefined;
+      ctx.requestTiming.readyAt = performance.now();
       // Shared across authentication refreshes as well as generation attempts.
       let toolRetries = 0;
       const attempt = async a => {
