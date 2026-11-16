@@ -92,6 +92,20 @@ npm start
 
 凭据默认保存在 `~/.madmodel-proxy/`，与项目目录分开；`logout` 不撤销学校侧会话。服务默认仅监听本机且不校验 API Key，同机能访问端口的程序和用户均可调用。开启鉴权或供其他设备访问，见[局域网部署](docs/DEPLOY-LAN.md)；存储方式与数据流向见[安全说明](SECURITY.md)。
 
+### 多协议端点（Claude Code / Codex）
+
+上游只实现 OpenAI Chat Completions。代理内置协议翻译，同一端口可同时接受三种客户端，无需再单独跑一层本地桥：
+
+| 客户端 | 端点 | 协议 | 配置要点 |
+|---|---|---|---|
+| OpenAI SDK / dsh | `POST /v1/chat/completions` | Chat Completions | 原样 |
+| Claude Code | `POST /v1/messages` | Anthropic Messages | `ANTHROPIC_BASE_URL` 指向代理根地址；`ANTHROPIC_AUTH_TOKEN` 填 API Key（`Authorization: Bearer` 或 `x-api-key` 均可） |
+| Codex | `POST /v1/responses` | OpenAI Responses | `openai_base_url` / `model_providers.*.base_url` 指向 `/v1`，`wire_api = "responses"` |
+
+三条路径共用同一套凭据续期、上下文预算预检、思考字段归一与工具调用补救；翻译只发生在 HTTP 适配层（`core/protocol-bridge.js`），业务编排不感知客户端协议。支持流式与非流式，工具定义、`tool_use`/`tool_result`、`function_call`/`function_call_output` 双向映射，usage 与错误体按客户端协议返回。
+
+已知限制：上游思考内容（`reasoning_content`）不映射为 Anthropic `thinking` 块（该块要求真实 signature）或 Responses 推理事件；图片等非文本块会被丢弃。模型名按客户端请求透传，请在客户端配置上游实际存在的模型 ID（见 `/v1/models`）。
+
 ### 校内 / 校外切换
 
 在运行窗口输入 `campus` 切到校园网直连，输入 `offcampus` 切到 WebVPN，回车生效。切换会重启服务并保存选择，未完成的请求需重试。

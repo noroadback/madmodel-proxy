@@ -18,6 +18,7 @@ const credentials = require('../platform/credentials');
 const { atomicWrite } = require('../platform/file-store');
 const { normalizeReasoningDelta } = require('../core/thinking');
 const { getModelMeta } = require('../core/model-registry');
+const { detectProtocol, toChatPayload, wrapContext, errorBody } = require('../core/protocol-bridge');
 
 function sendJson(res, status, value, extraHeaders) {
   const body = JSON.stringify(value);
@@ -360,9 +361,13 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
       });
     }
 
-    if (req.method !== 'POST' || !/^\/(v1\/)?chat\/completions$/.test(url)) {
+    // 三种客户端协议共用同一条业务流水线：chat 直通，Anthropic Messages /
+    // OpenAI Responses 在入口翻译成 chat、出口再翻译回去(core/protocol-bridge)。
+    const protocol = req.method === 'POST' ? detectProtocol(url) : null;
+    if (!protocol) {
       service.logReq(req, 404, started, 0, 'no-endpoint');
-      return openAiError(res, 404, '端点不存在。可用:POST /v1/chat/completions,GET /v1/models');
+      return openAiError(res, 404,
+        '端点不存在。可用:POST /v1/chat/completions、/v1/messages、/v1/responses，GET /v1/models');
     }
 
     let reservedBytes = 0;
@@ -377,7 +382,7 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
       reservedBytes += additional;
     };
     readChatBody(req, config, reserve).then(
-      ({ rawBody, size }) => handleChat(req, res, rawBody, size, started, startedMonotonic),
+      ({ rawBody, size }) => handleChat(req, res, rawBody, size, started, startedMonotonic, protocol),
       e => handleReadError(req, res, e, started)
     ).catch(e => {
       // 理论上不可达(service 已消解所有已知异常路径),保底防进程崩溃
@@ -429,7 +434,7 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
   }
 
   // ---- 为 core/proxy-service 构建 ctx:HTTP 细节全部收在这里 ----
-  function handleChat(req, res, rawBody, size, started, startedMonotonic) {
+  function handleChat(req, res, rawBody, size, started, startedMonotonic, protocol) {
     // 上游生命周期:客户端断开/聚合超时都能中止上游,不白烧配额。
     // 服务层与背压等待共用这一个 AbortController
     const ac = new AbortController();
@@ -552,7 +557,31 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
     // 是最后一道,应当同样自足)
     ctx.setThinkingFields = fields => { thinkingFields = fields; };
 
-    return service.handleRequest(ctx);
+    // 协议翻译只发生在这一层：请求先转成 chat payload，响应出口由包装后的
+    // ctx 翻译回客户端协议。core/proxy-service.js 全程只认 chat，无需改动。
+    let target = ctx;
+    if (protocol !== 'chat') {
+      let original;
+      try {
+        original = JSON.parse(rawBody.toString('utf8'));
+      } catch (e) {
+        service.logReq(req, 400, started, size, 'invalid-json');
+        return sendJson(res, 400, errorBody(protocol, 400, `请求体不是合法 JSON: ${e.message}`));
+      }
+      if (!original || typeof original !== 'object' || Array.isArray(original)) {
+        service.logReq(req, 400, started, size, 'invalid-payload');
+        return sendJson(res, 400, errorBody(protocol, 400, '请求体必须是 JSON 对象'));
+      }
+      let chatRaw;
+      try {
+        chatRaw = Buffer.from(JSON.stringify(toChatPayload(original, protocol, config.model)));
+      } catch (e) {
+        service.logReq(req, 500, started, size, `translate-error: ${e.message}`);
+        return sendJson(res, 500, errorBody(protocol, 500, `协议转换失败: ${e.message}`));
+      }
+      target = wrapContext(ctx, protocol, original, chatRaw);
+    }
+    return service.handleRequest(target);
   }
 
   server.maxConnections = config.maxConnections;

@@ -2,6 +2,15 @@
 
 历史记录描述对应版本的行为与观察；当前配置、限制及操作方法以 README 为准。
 
+## 未发布
+
+### 新增 Anthropic Messages / OpenAI Responses 协议翻译
+
+上游只提供 `POST /v1/chat/completions`，Claude Code 发 `/v1/messages`（Anthropic Messages）、Codex 发 `/v1/responses`（Responses），此前两者直连都会得到 404，需要额外跑一层本地协议桥。本次让代理原生支持这两个端点：`core/protocol-bridge.js` 在入口把请求翻成 chat payload，在出口把 chat 的流式/非流式响应翻回客户端协议，`adapters/http-server.js` 仅负责识别路由与包装 ctx，`core/proxy-service.js` 无需改动。
+
+覆盖流式 SSE 事件（`message_start`/`content_block_delta`/`message_stop`、`response.created`/`output_text.delta`/`response.completed`）、工具调用双向映射（`tool_use`/`tool_result`、`function_call`/`function_call_output`）、usage 与协议化错误体。凭据续期、上下文预算预检、思考字段归一、工具调用补救等既有能力对三条路径一视同仁。
+
+已知限制见 README「多协议端点」：上游思考内容不映射为 Anthropic `thinking` 块（需要真实 signature），图片等非文本块丢弃。新增 19 项单测，全量 `npm test` 573 项通过。
 ## 1.10.11
 
 ### 分词、请求计时与稳定性修复（2026-11-01）
