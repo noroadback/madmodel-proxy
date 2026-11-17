@@ -251,7 +251,8 @@ function mockCtx() {
   const sent = [];
   let headers = false;
   const ctx = {
-    req: { method: 'POST', url: '/v1/messages' }, res: {},
+    req: { method: 'POST', url: '/v1/messages' },
+    res: { end: text => { lines.push(String(text)); } },
     rawBody: Buffer.from('{}'), size: 2, started: Date.now(),
     abortController: new AbortController(),
     clientGone: () => false,
@@ -331,4 +332,69 @@ test('wrapContext: usage 帧经 writeSseLine 也能进入状态机', () => {
   const joined = lines.join('');
   assert.ok(joined.includes('"output_tokens":9'));
   assert.ok(joined.includes('event: message_stop'));
+});
+
+// ---------------------------------------------------------------- 审阅修复回归
+test('toChatPayload: Anthropic tool_result 与文字并存时文字不丢，排在 tool 消息之后', () => {
+  const p = toChatPayload({ model: MODEL, messages: [
+    { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }] },
+    { role: 'user', content: [
+      { type: 'tool_result', tool_use_id: 't1', content: 'file body' },
+      { type: 'text', text: '改用方案 B' },
+    ] },
+  ] }, 'anthropic', MODEL);
+  assert.deepStrictEqual(p.messages.slice(1), [
+    { role: 'tool', tool_call_id: 't1', content: 'file body' },
+    { role: 'user', content: '改用方案 B' },
+  ]);
+});
+
+test('toChatPayload: Responses 丢弃 reasoning 项，并行 function_call 合并为一条 assistant', () => {
+  const p = toChatPayload({ model: MODEL, input: [
+    { type: 'message', role: 'developer', content: 'rules' },
+    { role: 'user', content: [{ type: 'input_text', text: 'ls' }] },
+    { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'x' },
+    { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '查一下' }] },
+    { type: 'function_call', call_id: 'c1', name: 'a', arguments: '{}' },
+    { type: 'function_call', call_id: 'c2', name: 'b', arguments: '{}' },
+    { type: 'function_call_output', call_id: 'c1', output: '1' },
+    { type: 'function_call_output', call_id: 'c2', output: '2' },
+  ] }, 'responses', MODEL);
+  assert.deepStrictEqual(p.messages.map(m => m.role),
+    ['system', 'user', 'assistant', 'tool', 'tool']);
+  assert.strictEqual(p.messages[2].content, '查一下');
+  assert.deepStrictEqual(p.messages[2].tool_calls.map(c => c.id), ['c1', 'c2']);
+});
+
+test('wrapContext: 写出把底层 drain 等待交还调用方，拒绝可被 await 捕获', async () => {
+  const original = { model: MODEL, messages: [], stream: true };
+  const chatRaw = Buffer.from('{}');
+  let release;
+  const slow = mockCtx();
+  slow.ctx.writeSseLine = () => new Promise(resolve => { release = resolve; });
+  const w = wrapContext(slow.ctx, 'anthropic', original, chatRaw);
+  const pending = w.writeSseChunk(chatDelta({ content: 'x' }));
+  assert.ok(pending && typeof pending.then === 'function', '应返回等待 drain 的 promise');
+  release();
+
+  const gone = mockCtx();
+  gone.ctx.writeSseLine = () => Promise.reject(new Error('流式交付已关闭'));
+  const w2 = wrapContext(gone.ctx, 'anthropic', original, chatRaw);
+  w2.ensureSseHeaders();
+  await assert.rejects(w2.writeSseChunk(chatDelta({ content: 'x' })), /流式交付已关闭/);
+  await assert.rejects(w2.writeSseLine('data: [DONE]\n\n'), /流式交付已关闭/);
+});
+
+test('wrapContext: sendStreamError 按客户端协议收尾并中止上游', () => {
+  for (const [protocol, marker] of [['anthropic', 'event: error'], ['responses', 'event: response.failed']]) {
+    const { ctx, lines } = mockCtx();
+    const w = wrapContext(ctx, protocol, { model: MODEL, stream: true }, Buffer.from('{}'));
+    w.writeSseChunk(chatDelta({ content: 'x' }));
+    w.sendStreamError('上游中断', 'upstream_error', 502);
+    const joined = lines.join('');
+    assert.ok(joined.includes(marker));
+    assert.ok(joined.includes('上游中断'));
+    assert.ok(!joined.includes('"code":502'), '不应出现 OpenAI 形态的错误帧');
+    assert.strictEqual(ctx.abortController.signal.aborted, true);
+  }
 });

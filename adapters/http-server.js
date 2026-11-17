@@ -31,6 +31,10 @@ function sendJson(res, status, value, extraHeaders) {
 }
 
 function openAiError(res, status, message, type, extraHeaders, code) {
+  // 鉴权、读体等在进入业务前就失败的请求，也按客户端协议返回错误体
+  if (res.clientProtocol === 'anthropic') {
+    return sendJson(res, status, errorBody('anthropic', status, message, type), extraHeaders);
+  }
   sendJson(res, status, {
     error: { message, type: type || 'proxy_error', code: code ?? status },
   }, extraHeaders);
@@ -257,6 +261,7 @@ function createHttpServer({ config, service, getToken, modelRegistry }) {
     const started = Date.now();
     const startedMonotonic = performance.now();
     const url = (req.url || '').split('?')[0];
+    if (req.method === 'POST') res.clientProtocol = detectProtocol(url);
 
     // socket 层错误兜底:单条连接的故障不应击穿整个进程
     req.on('error', () => {});

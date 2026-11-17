@@ -93,9 +93,11 @@ function messagesFromAnthropic(body) {
         out.push({
           role: 'tool',
           tool_call_id: asString(r.tool_use_id),
-          content: textOf(r.content) || text,
+          content: textOf(r.content),
         });
       }
+      // chat 的 tool 消息必须紧跟 assistant.tool_calls，同条消息里的文字只能排在其后
+      if (text) out.push({ role: 'user', content: text });
       continue;
     }
     if (uses.length) {
@@ -127,15 +129,19 @@ function messagesFromResponses(body) {
   for (const it of Array.isArray(items) ? items : []) {
     if (!it || typeof it !== 'object') continue;
     if (it.type === 'function_call') {
-      out.push({
-        role: 'assistant',
-        content: null,
-        tool_calls: [{
-          id: asString(it.call_id || it.id) || newId('call_'),
-          type: 'function',
-          function: { name: asString(it.name), arguments: safeJsonArgs(it.arguments) },
-        }],
-      });
+      const call = {
+        id: asString(it.call_id || it.id) || newId('call_'),
+        type: 'function',
+        function: { name: asString(it.name), arguments: safeJsonArgs(it.arguments) },
+      };
+      // 同一轮的并行调用在 chat 里必须落在同一条 assistant 消息上
+      const last = out[out.length - 1];
+      if (last && last.role === 'assistant') {
+        (last.tool_calls ||= []).push(call);
+        if (!last.content) last.content = null;
+      } else {
+        out.push({ role: 'assistant', content: null, tool_calls: [call] });
+      }
       continue;
     }
     if (it.type === 'function_call_output') {
@@ -146,8 +152,10 @@ function messagesFromResponses(body) {
       });
       continue;
     }
+    // reasoning 等非消息项在 chat 里没有对应物，丢弃
+    if (it.type !== undefined && it.type !== 'message') continue;
     const role = it.role === 'assistant' ? 'assistant'
-      : it.role === 'system' ? 'system' : 'user';
+      : (it.role === 'system' || it.role === 'developer') ? 'system' : 'user';
     out.push({ role, content: textOf(it.content) });
   }
   return out;
@@ -509,16 +517,33 @@ function wrapContext(ctx, protocol, original, chatRawBody) {
   let thinkingFields = null;
   const wrapped = Object.create(ctx);
 
+  const frame = e => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`;
+  // 底层 writeSseLine 在缓冲区满时返回等待 drain 的 promise；必须交还给业务层
+  // await，否则背压失效，客户端断开时的 rejection 也无人接收。
   function emitAll(list) {
+    const waits = [];
     for (const e of list || []) {
-      ctx.writeSseLine(`event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`);
+      const p = ctx.writeSseLine(frame(e));
+      if (p) waits.push(p);
     }
+    return waits.length ? Promise.all(waits).then(() => {}) : undefined;
   }
+  // 业务层同步调用 ensureSseHeaders 且不 await，起始帧的等待先挂起，
+  // 并入下一次写出。
+  let startWait = null;
   function begin() {
     if (started) return;
     started = true;
     ctx.ensureSseHeaders();
-    emitAll(translator.start());
+    const p = emitAll(translator.start());
+    if (p) { startWait = p; p.catch(() => {}); }
+  }
+  function emit(list) {
+    begin();
+    const p = emitAll(list);
+    const s = startWait;
+    startWait = null;
+    return s ? Promise.all([s, p]).then(() => {}) : p;
   }
 
   wrapped.rawBody = chatRawBody;
@@ -532,17 +557,31 @@ function wrapContext(ctx, protocol, original, chatRawBody) {
     // 原 ctx.writeSseChunk 承担思考字段归一；协议分支不走它，这里补上，
     // 否则上游用 qwen 方言吐思考时下游会拿到未归一化的裸字段。
     normalizeReasoningDelta(obj, thinkingFields);
-    begin();
-    emitAll(translator.chunk(obj));
+    return emit(translator.chunk(obj));
   };
   wrapped.writeSseLine = line => {
-    begin();
     const text = String(line);
-    if (text.includes('[DONE]')) return emitAll(translator.finish());
+    if (text.includes('[DONE]')) return emit(translator.finish());
     const m = /^data:\s*(\{[\s\S]*\})\s*$/.exec(text.trim());
+    let obj;
     if (m) {
-      try { emitAll(translator.chunk(JSON.parse(m[1]))); } catch (e) { /* 忽略非 JSON 帧 */ }
+      try { obj = JSON.parse(m[1]); } catch (e) { /* 忽略非 JSON 帧 */ }
     }
+    return emit(obj ? translator.chunk(obj) : []);
+  };
+  // 流中错误是终态：与原 ctx 一样不等 drain、直接收尾并中止上游，
+  // 只是把错误帧换成客户端协议的形态。
+  wrapped.sendStreamError = message => {
+    const res = ctx.res;
+    if (!res || res.destroyed || res.writableEnded) return;
+    let head = '';
+    if (!started) {
+      started = true;
+      ctx.ensureSseHeaders();
+      head = translator.start().map(frame).join('');
+    }
+    res.end(head + translator.error(message).map(frame).join(''));
+    ctx.abortController.abort();
   };
   wrapped.sendJson = (status, body, headers) => {
     if (status === 200 && body && body.object === 'chat.completion') {
@@ -553,12 +592,7 @@ function wrapContext(ctx, protocol, original, chatRawBody) {
     return ctx.sendJson(status, body, headers);
   };
   wrapped.sendError = (status, message, type, headers) => {
-    if (ctx.headersSent() || ctx.sseHeadersSent()) {
-      begin();
-      emitAll(translator.error(message));
-      ctx.endResponse();
-      return;
-    }
+    if (ctx.headersSent() || ctx.sseHeadersSent()) return wrapped.sendStreamError(message);
     return ctx.sendJson(status, errorBody(protocol, status, message, type), headers);
   };
   return wrapped;
