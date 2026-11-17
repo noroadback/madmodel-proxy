@@ -158,7 +158,18 @@ function messagesFromResponses(body) {
       : (it.role === 'system' || it.role === 'developer') ? 'system' : 'user';
     out.push({ role, content: textOf(it.content) });
   }
-  return out;
+  return leadingSystemOnly(out);
+}
+
+// 上游只接受开头的一条 system 消息：开头连续的 system 合并，
+// 对话中途出现的改作 user。
+function leadingSystemOnly(messages) {
+  const head = [];
+  let i = 0;
+  while (i < messages.length && messages[i].role === 'system') head.push(messages[i++].content);
+  const rest = messages.slice(i).map(m => (m.role === 'system' ? { ...m, role: 'user' } : m));
+  const text = head.filter(Boolean).join('\n\n');
+  return text ? [{ role: 'system', content: text }, ...rest] : rest;
 }
 
 function chatTools(tools, protocol) {

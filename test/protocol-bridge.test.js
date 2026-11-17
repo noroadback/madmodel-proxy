@@ -398,3 +398,16 @@ test('wrapContext: sendStreamError 按客户端协议收尾并中止上游', () 
     assert.strictEqual(ctx.abortController.signal.aborted, true);
   }
 });
+
+test('toChatPayload: Responses 只保留开头一条 system，中途的 developer 改作 user', () => {
+  const p = toChatPayload({ model: MODEL, instructions: 'base', input: [
+    { type: 'message', role: 'developer', content: 'rules' },
+    { type: 'message', role: 'user', content: 'hi' },
+    { type: 'message', role: 'developer', content: 'late' },
+  ] }, 'responses', MODEL);
+  assert.deepStrictEqual(p.messages, [
+    { role: 'system', content: 'base\n\nrules' },
+    { role: 'user', content: 'hi' },
+    { role: 'user', content: 'late' },
+  ]);
+});
