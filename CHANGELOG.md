@@ -2,15 +2,28 @@
 
 历史记录描述对应版本的行为与观察；当前配置、限制及操作方法以 README 为准。
 
-## 未发布
+## 1.10.12
 
-### 新增 Anthropic Messages / OpenAI Responses 协议翻译
+### Claude Code 与 Codex 协议支持（2026-11-17）
 
-上游只提供 `POST /v1/chat/completions`，Claude Code 发 `/v1/messages`（Anthropic Messages）、Codex 发 `/v1/responses`（Responses），此前两者直连都会得到 404，需要额外跑一层本地协议桥。本次让代理原生支持这两个端点：`core/protocol-bridge.js` 在入口把请求翻成 chat payload，在出口把 chat 的流式/非流式响应翻回客户端协议，`adapters/http-server.js` 仅负责识别路由与包装 ctx，`core/proxy-service.js` 无需改动。
+**新增 Anthropic Messages 端点**。`POST /v1/messages` 接受 Claude Code 的请求，代理在入口转换为 Chat Completions，返回时转换回 Anthropic 格式。支持流式与非流式、工具定义、`tool_use` 与 `tool_result`、用量和错误体。`Authorization: Bearer` 与 `x-api-key` 均可提交 API Key。
 
-覆盖流式 SSE 事件（`message_start`/`content_block_delta`/`message_stop`、`response.created`/`output_text.delta`/`response.completed`）、工具调用双向映射（`tool_use`/`tool_result`、`function_call`/`function_call_output`）、usage 与协议化错误体。凭据续期、上下文预算预检、思考字段归一、工具调用补救等既有能力对三条路径一视同仁。
+**新增 OpenAI Responses 端点**。`POST /v1/responses` 接受 Codex 的请求，支持 `instructions`、字符串或条目形式的 `input`、`function_call` 与 `function_call_output`，以及流式事件序列。
 
-已知限制见 README「多协议端点」：上游思考内容不映射为 Anthropic `thinking` 块（需要真实 signature），图片等非文本块丢弃。新增 19 项单测，全量 `npm test` 573 项通过。
+**沿用既有处理**。两个端点与 `/v1/chat/completions` 共用凭据续期、上下文预算预检、思考字段归一和工具参数重试，转换仅发生在 HTTP 适配层。
+
+**修订请求转换**。Anthropic 消息同时包含工具结果和文字时，文字保留为工具结果之后的用户消息。Responses 输入中的推理条目不再转为空消息，同一轮的并行调用合并为一条助手消息。开头的系统与开发者消息合并为一条，对话中途出现的改为用户消息，避免上游以 `System message must be at the beginning` 拒绝请求。
+
+**修订流式交付与错误格式**。转换后的流式输出恢复背压，客户端读取缓慢时暂停读取上游。流式中途失败时，Anthropic 客户端收到 `error` 事件，Responses 客户端收到 `response.failed` 事件。`/v1/messages` 的鉴权失败、端点不存在和请求体错误返回 Anthropic 错误体。
+
+**已知限制**。上游思考内容不转换为 Anthropic `thinking` 块或 Responses 推理事件，思考仍计入输出用量。图片等非文本内容被丢弃。`/v1/messages/count_tokens` 未实现。R1 按普通聊天处理，不执行工具调用。
+
+2026-11-17 校园网直连实测。Claude Code 2.1.302 经 `/v1/messages` 使用 qwen3.8-27b 完成读取文件的工具调用，并答出文件内容。Codex 0.163.0 经 `/v1/responses` 完成五轮流式请求，工具调用与结果回传正常；测试机的 Codex 沙箱策略拦截了命令执行，未验证命令输出。DeepSeek-V4.1-Flash 测试时上游不可达，未覆盖。
+
+Windows、Node.js 24.11.1 下的 870 项离线测试、6 项平台检查、105 个 JavaScript 文件语法检查及本地发布检查通过。CI 覆盖 Node.js 18.14 / 20 / 24 和三个平台。
+
+感谢 @2catycm 在 [PR #14](https://github.com/noroadback/madmodel-proxy/pull/14) 提供协议转换实现。
+
 ## 1.10.11
 
 ### 分词、请求计时与稳定性修复（2026-11-01）
