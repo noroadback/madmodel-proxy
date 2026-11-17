@@ -94,17 +94,17 @@ npm start
 
 ### 多协议端点（Claude Code / Codex）
 
-上游只实现 OpenAI Chat Completions。代理内置协议翻译，同一端口可同时接受三种客户端，无需再单独跑一层本地桥：
+上游只提供 OpenAI Chat Completions。代理内置协议转换，同一端口可接入三类客户端。
 
 | 客户端 | 端点 | 协议 | 配置要点 |
 |---|---|---|---|
-| OpenAI SDK / dsh | `POST /v1/chat/completions` | Chat Completions | 原样 |
-| Claude Code | `POST /v1/messages` | Anthropic Messages | `ANTHROPIC_BASE_URL` 指向代理根地址；`ANTHROPIC_AUTH_TOKEN` 填 API Key（`Authorization: Bearer` 或 `x-api-key` 均可） |
-| Codex | `POST /v1/responses` | OpenAI Responses | `openai_base_url` / `model_providers.*.base_url` 指向 `/v1`，`wire_api = "responses"` |
+| OpenAI 兼容客户端 | `POST /v1/chat/completions` | Chat Completions | 无需额外配置 |
+| Claude Code | `POST /v1/messages` | Anthropic Messages | `ANTHROPIC_BASE_URL` 设为代理根地址，`ANTHROPIC_AUTH_TOKEN` 填 API Key |
+| Codex | `POST /v1/responses` | OpenAI Responses | `model_providers.*.base_url` 设为 `/v1`，`wire_api = "responses"` |
 
-三条路径共用同一套凭据续期、上下文预算预检、思考字段归一与工具调用补救；翻译只发生在 HTTP 适配层（`core/protocol-bridge.js`），业务编排不感知客户端协议。支持流式与非流式，工具定义、`tool_use`/`tool_result`、`function_call`/`function_call_output` 双向映射，usage 与错误体按客户端协议返回。
+三个端点共用凭据续期、上下文预算预检、思考字段归一和工具参数重试。支持流式与非流式、工具调用，用量与错误体按客户端协议返回。
 
-已知限制：上游思考内容（`reasoning_content`）不映射为 Anthropic `thinking` 块（该块要求真实 signature）或 Responses 推理事件；图片等非文本块会被丢弃。模型名按客户端请求透传，请在客户端配置上游实际存在的模型 ID（见 `/v1/models`）。
+思考内容不会显示在 Claude Code 或 Codex 中，但仍计入输出用量。图片等非文本内容会被丢弃。模型名按客户端请求转发，需填写 `/v1/models` 列出的 ID。R1 按普通聊天处理，需要执行工具时请选择支持原生工具调用的模型。
 
 ### 校内 / 校外切换
 
